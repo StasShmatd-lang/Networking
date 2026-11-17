@@ -1,0 +1,9 @@
+node_modules/
+client/dist/
+uploads/*
+!uploads/.gitkeep
+.DS_Store
+.env
+*.log
+.vite/
+*.tsbuildinfo
