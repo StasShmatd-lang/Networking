@@ -50,6 +50,7 @@ export type EventState = {
   timer: TimerState;
   role?: string;
   guestAccessToken?: string;
+  screenToken?: string;
   me?: Guest | null;
   pair?: {
     id: string;

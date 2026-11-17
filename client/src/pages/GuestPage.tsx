@@ -184,7 +184,7 @@ export function GuestPage() {
               {uploading && <span className="mt-1 block text-xs text-mute">Загрузка…</span>}
               {photoUrl && (
                 <div className="mt-3 flex justify-center">
-                  <Avatar guest={{ name: name || "Вы", photoUrl }} size={88} />
+                  <Avatar guest={{ name: name || "Вы", photoUrl }} size={88} accessKey={accessKey} />
                 </div>
               )}
             </label>
@@ -223,7 +223,7 @@ export function GuestPage() {
 
       {(phase === "lobby" || phase === "between") && (
         <section className="panel animate-reveal text-center">
-          <Avatar guest={me} size={96} className="mx-auto mb-4" />
+          <Avatar guest={me} size={96} className="mx-auto mb-4" accessKey={accessKey} />
           <h1 className="display text-2xl text-mist">{me.name}</h1>
           <p className="text-mute">{me.company}</p>
           <p className="mt-4 text-sm text-gold-bright">
@@ -239,7 +239,7 @@ export function GuestPage() {
         <section className="panel animate-reveal text-center">
           <div className="relative mx-auto mb-4 h-24 w-24">
             <div className="absolute inset-0 animate-pulse-ring rounded-full border border-gold/40" />
-            <Avatar guest={me} size={96} />
+            <Avatar guest={me} size={96} accessKey={accessKey} />
           </div>
           <h1 className="display text-2xl text-mist">Ищем пару…</h1>
           <p className="mt-2 text-mute">Карусель перемешивает зал</p>
@@ -262,14 +262,14 @@ export function GuestPage() {
                 </p>
                 <div className="mt-4 flex flex-wrap items-start justify-center gap-3">
                   <div className="flex flex-col items-center gap-1">
-                    <Avatar guest={me} size={72} />
+                    <Avatar guest={me} size={72} accessKey={accessKey} />
                     <span className="max-w-[5.5rem] truncate text-xs text-mute">вы</span>
                   </div>
                   {partners.map((p) => (
                     <div key={p.id} className="flex items-start gap-3">
                       <span className="display pt-5 text-2xl text-gold">×</span>
                       <div className="flex flex-col items-center gap-1">
-                        <Avatar guest={p} size={72} />
+                        <Avatar guest={p} size={72} accessKey={accessKey} />
                         <span className="max-w-[6.5rem] truncate text-sm font-semibold text-mist">{p.name}</span>
                         <span className="max-w-[6.5rem] truncate text-xs text-mute">{p.company}</span>
                       </div>

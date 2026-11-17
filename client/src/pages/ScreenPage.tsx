@@ -1,5 +1,5 @@
-import { useEffect, useMemo } from "react";
-import { useParams } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { useParams, useSearchParams } from "react-router-dom";
 import { FlyingAvatars } from "../components/FlyingAvatars";
 import { HallQr } from "../components/HallQr";
 import { PairBoard } from "../components/PairBoard";
@@ -19,8 +19,12 @@ const PHASE_TITLE: Record<string, string> = {
 
 export function ScreenPage() {
   const { eventId = "" } = useParams();
+  const [search] = useSearchParams();
+  const screenToken = search.get("s") || sessionStorage.getItem(`screenToken:${eventId}`) || "";
   const base = useLinkBase();
-  const { state, connected } = useEventSocket(eventId, "screen");
+  const { state, connected, setError, error } = useEventSocket(eventId, "screen");
+  const [authed, setAuthed] = useState(false);
+
   const joinUrl = useMemo(() => {
     if (!eventId) return "";
     const k = state?.guestAccessToken;
@@ -29,19 +33,48 @@ export function ScreenPage() {
 
   useEffect(() => {
     if (!eventId) return;
-    getSocket().emit("screen:join", { eventId });
-  }, [eventId]);
+    if (!screenToken) {
+      setError("Откройте экран по ссылке из панели ведущего");
+      return;
+    }
+    sessionStorage.setItem(`screenToken:${eventId}`, screenToken);
+    getSocket().emit(
+      "screen:join",
+      { eventId, screenToken },
+      (ack: { ok: boolean; error?: string }) => {
+        if (!ack?.ok) {
+          setError(ack?.error || "Нет доступа к экрану");
+          setAuthed(false);
+          return;
+        }
+        setAuthed(true);
+        setError(null);
+      },
+    );
+  }, [eventId, screenToken, setError]);
 
   const phase = state?.phase || "lobby";
   const waiting = phase === "lobby" || phase === "between" || phase === "done";
   const showFly = phase === "lobby" || phase === "matching" || phase === "searching" || phase === "between";
   const showPairs = phase === "networking";
 
+  if (!authed) {
+    return (
+      <div className="shell-hall flex items-center justify-center">
+        <p className="max-w-md text-center text-xl text-mute">
+          {error || "Подключаем экран зала…"}
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="shell-hall">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(201,166,107,0.12),transparent_40%),radial-gradient(circle_at_80%_0%,rgba(42,157,143,0.14),transparent_35%)]" />
 
-      {showFly && <FlyingAvatars guests={state?.guests || []} />}
+      {showFly && (
+        <FlyingAvatars guests={state?.guests || []} accessKey={state?.guestAccessToken} />
+      )}
 
       <header className="relative z-10 flex items-start justify-between gap-6">
         <div className="min-w-0 flex-1">

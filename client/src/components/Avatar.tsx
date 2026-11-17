@@ -1,13 +1,16 @@
 import type { Guest } from "../types";
+import { mediaUrl } from "../lib/mediaUrl";
 
 export function Avatar({
   guest,
   size = 64,
   className = "",
+  accessKey,
 }: {
   guest: Pick<Guest, "name" | "photoUrl"> | null | undefined;
   size?: number;
   className?: string;
+  accessKey?: string | null;
 }) {
   const initials = (guest?.name || "?")
     .split(/\s+/)
@@ -16,11 +19,13 @@ export function Avatar({
     .slice(0, 2)
     .toUpperCase();
 
-  if (guest?.photoUrl) {
+  const src = mediaUrl(guest?.photoUrl, accessKey);
+
+  if (src) {
     return (
       <img
-        src={guest.photoUrl}
-        alt={guest.name}
+        src={src}
+        alt={guest?.name || ""}
         width={size}
         height={size}
         className={`rounded-full object-cover ring-2 ring-gold/40 ${className}`}

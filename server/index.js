@@ -134,6 +134,7 @@ function createEvent() {
     id,
     hostToken: nanoid(16),
     guestAccessToken: nanoid(18),
+    screenToken: nanoid(18),
     phase: "lobby",
     round: 0,
     totalRounds: 5,
@@ -275,8 +276,12 @@ function publicState(ev, role = "guest") {
     timer: serializeTimer(ev),
     role,
   };
-  // Join key is already on the projected QR; host/screen need it to build links
-  if (role === "host" || role === "screen") {
+  // Secrets only after authenticated host/screen join — never via bare event id
+  if (role === "host") {
+    base.guestAccessToken = ev.guestAccessToken;
+    base.screenToken = ev.screenToken;
+  }
+  if (role === "screen") {
     base.guestAccessToken = ev.guestAccessToken;
   }
   return base;
@@ -465,26 +470,36 @@ app.use(
   }),
 );
 app.use(express.json({ limit: "256kb" }));
-app.use(
-  "/uploads",
-  express.static(UPLOADS, {
-    setHeaders(res) {
-      res.setHeader("X-Content-Type-Options", "nosniff");
-      res.setHeader("Cache-Control", "public, max-age=3600");
-    },
-  }),
-);
 app.use("/brand", express.static(path.join(ROOT, "brand")));
+
+/** Photos only with event guest/screen/host secret — not world-readable */
+app.get("/uploads/:eventId/:file", (req, res) => {
+  const { eventId, file } = req.params;
+  if (!/^[A-Za-z0-9_-]+\.(jpe?g|png|webp)$/i.test(file)) {
+    return res.status(400).end();
+  }
+  const ev = events.get(eventId);
+  if (!ev) return res.status(404).end();
+  const key = String(req.query.k || req.query.s || req.query.h || "");
+  const allowed =
+    key && (key === ev.guestAccessToken || key === ev.screenToken || key === ev.hostToken);
+  if (!allowed) return res.status(401).end();
+  const abs = path.join(UPLOADS, eventId, file);
+  if (!abs.startsWith(path.join(UPLOADS, eventId))) return res.status(400).end();
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Cache-Control", "private, max-age=300");
+  res.sendFile(abs, (err) => {
+    if (err && !res.headersSent) res.status(404).end();
+  });
+});
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, events: events.size });
 });
 
 app.get("/api/link-base", (req, res) => {
-  res.json({
-    linkBase: linkBase(req),
-    lanOrigins: clientLanOrigins(),
-  });
+  // Never expose LAN interface list on the public API
+  res.json({ linkBase: linkBase(req) });
 });
 
 app.post("/api/events", (req, res) => {
@@ -501,9 +516,10 @@ app.post("/api/events", (req, res) => {
     id: ev.id,
     hostToken: ev.hostToken,
     guestAccessToken: ev.guestAccessToken,
+    screenToken: ev.screenToken,
     joinPath: `/join/${ev.id}?k=${ev.guestAccessToken}`,
     hostPath: `/host/${ev.id}`,
-    screenPath: `/screen/${ev.id}`,
+    screenPath: `/screen/${ev.id}?s=${ev.screenToken}`,
   });
 });
 
@@ -637,9 +653,12 @@ io.on("connection", (socket) => {
     socket.emit("state", publicState(ev, "host"));
   });
 
-  socket.on("screen:join", ({ eventId }, ack) => {
+  socket.on("screen:join", ({ eventId, screenToken }, ack) => {
     const ev = events.get(eventId);
     if (!ev) return ack?.({ ok: false, error: "Событие не найдено" });
+    if (!screenToken || screenToken !== ev.screenToken) {
+      return ack?.({ ok: false, error: "Нужна ссылка экрана от ведущего" });
+    }
     socket.join(`screen:${ev.id}`);
     socket.data.role = "screen";
     socket.data.eventId = ev.id;
@@ -648,6 +667,13 @@ io.on("connection", (socket) => {
   });
 
   socket.on("guest:join", ({ eventId, guestId, guestToken, accessKey, name, company, photoUrl }, ack) => {
+    const ip = socket.handshake.address || "unknown";
+    if (!rateLimit(`join-ip:${ip}`, 60, 60_000)) {
+      return ack?.({ ok: false, error: "Слишком много попыток входа" });
+    }
+    if (!rateLimit(`join-ev:${eventId}`, 120, 60_000)) {
+      return ack?.({ ok: false, error: "Слишком много регистраций на событие" });
+    }
     const ev = events.get(eventId);
     if (!ev) return ack?.({ ok: false, error: "Событие не найдено" });
 

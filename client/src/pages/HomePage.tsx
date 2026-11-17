@@ -15,6 +15,10 @@ export function HomePage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Ошибка");
       sessionStorage.setItem(`hostToken:${data.id}`, data.hostToken);
+      if (data.screenToken) sessionStorage.setItem(`screenToken:${data.id}`, data.screenToken);
+      if (data.guestAccessToken) {
+        sessionStorage.setItem(`guestAccess:${data.id}`, data.guestAccessToken);
+      }
       nav(`/host/${data.id}`);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Не удалось создать");

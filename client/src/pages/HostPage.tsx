@@ -59,7 +59,18 @@ export function HostPage() {
     const k = state?.guestAccessToken;
     return k ? `${base}/join/${eventId}?k=${encodeURIComponent(k)}` : `${base}/join/${eventId}`;
   }, [base, eventId, state?.guestAccessToken]);
-  const screenUrl = useMemo(() => `${base}/screen/${eventId}`, [base, eventId]);
+  const screenUrl = useMemo(() => {
+    const s = state?.screenToken || sessionStorage.getItem(`screenToken:${eventId}`) || "";
+    return s
+      ? `${base}/screen/${eventId}?s=${encodeURIComponent(s)}`
+      : `${base}/screen/${eventId}`;
+  }, [base, eventId, state?.screenToken]);
+
+  useEffect(() => {
+    if (state?.screenToken) {
+      sessionStorage.setItem(`screenToken:${eventId}`, state.screenToken);
+    }
+  }, [eventId, state?.screenToken]);
 
   function saveSettings() {
     const socket = getSocket();

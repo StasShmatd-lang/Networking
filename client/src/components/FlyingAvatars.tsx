@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import type { Guest } from "../types";
 import { Avatar } from "./Avatar";
 
-export function FlyingAvatars({ guests }: { guests: Guest[] }) {
+export function FlyingAvatars({ guests, accessKey }: { guests: Guest[]; accessKey?: string | null }) {
   const nodes = useMemo(() => {
     const list = guests.slice(0, 120);
     return list.map((g, i) => {
@@ -28,7 +28,7 @@ export function FlyingAvatars({ guests }: { guests: Guest[] }) {
             animationDuration: `${duration}s`,
           }}
         >
-          <Avatar guest={g} size={size} className="shadow-glow" />
+          <Avatar guest={g} size={size} className="shadow-glow" accessKey={accessKey} />
         </div>
       ))}
     </div>
