@@ -51,6 +51,52 @@ const DEFAULT_QUESTIONS = [
 /** @type {Map<string, Event>} */
 const events = new Map();
 
+/** @type {Map<string, { n: number, reset: number }>} */
+const rateBuckets = new Map();
+
+function rateLimit(key, max, windowMs) {
+  const now = Date.now();
+  let b = rateBuckets.get(key);
+  if (!b || now > b.reset) b = { n: 0, reset: now + windowMs };
+  b.n += 1;
+  rateBuckets.set(key, b);
+  return b.n <= max;
+}
+
+function clientIp(req) {
+  const xf = String(req.headers["x-forwarded-for"] || "")
+    .split(",")[0]
+    .trim();
+  return xf || req.socket?.remoteAddress || "unknown";
+}
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  try {
+    const u = new URL(origin);
+    if (PUBLIC_ORIGIN && origin.replace(/\/$/, "") === PUBLIC_ORIGIN) return true;
+    if (u.hostname === "localhost" || u.hostname === "127.0.0.1") return true;
+    if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(u.hostname)) return true;
+    if (u.hostname.endsWith(".cursor.app") || u.hostname.endsWith(".cursor.so")) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+const ALLOWED_IMAGE_MIME = {
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+};
+
+function safePhotoUrl(url) {
+  if (!url || typeof url !== "string") return null;
+  const trimmed = url.trim();
+  if (!/^\/uploads\/[A-Za-z0-9_-]+\.(jpe?g|png|webp)$/i.test(trimmed)) return null;
+  return trimmed;
+}
+
 function clientLanOrigins() {
   const out = [];
   for (const addrs of Object.values(os.networkInterfaces())) {
@@ -376,24 +422,38 @@ function endRound(io, ev) {
 }
 
 const app = express();
-app.use(cors({ origin: true }));
-app.use(express.json({ limit: "2mb" }));
-app.use("/uploads", express.static(UPLOADS));
+app.use(
+  cors({
+    origin(origin, cb) {
+      cb(null, isAllowedOrigin(origin));
+    },
+  }),
+);
+app.use(express.json({ limit: "256kb" }));
+app.use(
+  "/uploads",
+  express.static(UPLOADS, {
+    setHeaders(res) {
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Cache-Control", "public, max-age=3600");
+    },
+  }),
+);
 app.use("/brand", express.static(path.join(ROOT, "brand")));
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, UPLOADS),
   filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname || "").slice(0, 8) || ".jpg";
+    const ext = ALLOWED_IMAGE_MIME[file.mimetype] || ".jpg";
     cb(null, `${nanoid(12)}${ext}`);
   },
 });
 const upload = multer({
   storage,
-  limits: { fileSize: 4 * 1024 * 1024 },
+  limits: { fileSize: 2 * 1024 * 1024, files: 1 },
   fileFilter: (_req, file, cb) => {
-    if (!file.mimetype.startsWith("image/")) {
-      cb(new Error("Только изображения"));
+    if (!ALLOWED_IMAGE_MIME[file.mimetype]) {
+      cb(new Error("Только JPEG, PNG или WebP"));
       return;
     }
     cb(null, true);
@@ -411,7 +471,15 @@ app.get("/api/link-base", (req, res) => {
   });
 });
 
-app.post("/api/events", (_req, res) => {
+app.post("/api/events", (req, res) => {
+  const ip = clientIp(req);
+  if (!rateLimit(`event:${ip}`, 10, 60_000)) {
+    return res.status(429).json({ error: "Слишком много событий, подождите минуту" });
+  }
+  // Cap live events in memory
+  if (events.size >= 200) {
+    return res.status(503).json({ error: "Сервер занят, попробуйте позже" });
+  }
   const ev = createEvent();
   res.json({
     id: ev.id,
@@ -428,9 +496,16 @@ app.get("/api/events/:id", (req, res) => {
   res.json(publicState(ev, "guest"));
 });
 
-app.post("/api/upload", upload.single("photo"), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: "Нет файла" });
-  res.json({ photoUrl: `/uploads/${req.file.filename}` });
+app.post("/api/upload", (req, res) => {
+  const ip = clientIp(req);
+  if (!rateLimit(`upload:${ip}`, 30, 60_000)) {
+    return res.status(429).json({ error: "Слишком много загрузок" });
+  }
+  upload.single("photo")(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message || "Ошибка загрузки" });
+    if (!req.file) return res.status(400).json({ error: "Нет файла" });
+    res.json({ photoUrl: `/uploads/${req.file.filename}` });
+  });
 });
 
 if (fs.existsSync(CLIENT_DIST)) {
@@ -445,11 +520,36 @@ if (fs.existsSync(CLIENT_DIST)) {
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: true },
-  maxHttpBufferSize: 2e6,
+  cors: {
+    origin(origin, cb) {
+      cb(null, isAllowedOrigin(origin));
+    },
+  },
+  maxHttpBufferSize: 1e6,
   pingInterval: 20000,
   pingTimeout: 25000,
 });
+
+function requireHost(socket, eventId, hostToken) {
+  const ev = events.get(eventId);
+  if (!ev) return { error: "Событие не найдено" };
+  if (!hostToken || hostToken !== ev.hostToken) return { error: "Нет доступа" };
+  if (socket.data.role !== "host" || socket.data.eventId !== eventId) {
+    return { error: "Сначала войдите как ведущий" };
+  }
+  return { ev };
+}
+
+function requireGuestSession(socket, eventId) {
+  const ev = events.get(eventId);
+  if (!ev) return { error: "Событие не найдено" };
+  if (socket.data.role !== "guest" || socket.data.eventId !== eventId || !socket.data.guestId) {
+    return { error: "Нет сессии гостя" };
+  }
+  const guestId = socket.data.guestId;
+  if (!ev.guests.has(guestId)) return { error: "Гость не найден" };
+  return { ev, guestId };
+}
 
 // Global timer tick for all events
 setInterval(() => {
@@ -464,13 +564,14 @@ io.on("connection", (socket) => {
   socket.on("host:join", ({ eventId, hostToken }, ack) => {
     const ev = events.get(eventId);
     if (!ev) return ack?.({ ok: false, error: "Событие не найдено" });
-    if (hostToken && hostToken !== ev.hostToken) {
-      return ack?.({ ok: false, error: "Неверный токен ведущего" });
+    if (!hostToken || hostToken !== ev.hostToken) {
+      return ack?.({ ok: false, error: "Нужен ключ ведущего. Создайте событие заново." });
     }
     socket.join(`host:${ev.id}`);
     socket.data.role = "host";
     socket.data.eventId = ev.id;
-    ack?.({ ok: true, hostToken: ev.hostToken, state: publicState(ev, "host") });
+    // Do not echo hostToken — client already has it from create
+    ack?.({ ok: true, state: publicState(ev, "host") });
     socket.emit("state", publicState(ev, "host"));
   });
 
@@ -484,15 +585,25 @@ io.on("connection", (socket) => {
     socket.emit("state", publicState(ev, "screen"));
   });
 
-  socket.on("guest:join", ({ eventId, guestId, name, company, photoUrl }, ack) => {
+  socket.on("guest:join", ({ eventId, guestId, guestToken, name, company, photoUrl }, ack) => {
     const ev = events.get(eventId);
     if (!ev) return ack?.({ ok: false, error: "Событие не найдено" });
-    if (ev.phase !== "lobby" && ev.phase !== "between" && !guestId) {
-      return ack?.({ ok: false, error: "Регистрация закрыта — дождитесь паузы между раундами" });
-    }
 
     let guest = guestId ? ev.guests.get(guestId) : null;
-    if (!guest) {
+    if (guest) {
+      if (!guestToken || guestToken !== guest.token) {
+        return ack?.({ ok: false, error: "Нет доступа к профилю гостя" });
+      }
+      guest.socketId = socket.id;
+      if (name) guest.name = String(name).trim().slice(0, 60);
+      if (company) guest.company = String(company).trim().slice(0, 80);
+      const photo = safePhotoUrl(photoUrl);
+      if (photo) guest.photoUrl = photo;
+      guest.ready = true;
+    } else {
+      if (ev.phase !== "lobby" && ev.phase !== "between") {
+        return ack?.({ ok: false, error: "Регистрация закрыта — дождитесь паузы между раундами" });
+      }
       if (ev.guests.size >= 650) {
         return ack?.({ ok: false, error: "Зал заполнен" });
       }
@@ -501,32 +612,32 @@ io.on("connection", (socket) => {
       if (!nm || !co) return ack?.({ ok: false, error: "Нужны имя и компания" });
       guest = {
         id: nanoid(10),
+        token: nanoid(18),
         name: nm,
         company: co,
-        photoUrl: String(photoUrl || "").slice(0, 200) || null,
+        photoUrl: safePhotoUrl(photoUrl),
         ready: true,
         socketId: socket.id,
       };
       ev.guests.set(guest.id, guest);
-    } else {
-      guest.socketId = socket.id;
-      if (name) guest.name = String(name).trim().slice(0, 60);
-      if (company) guest.company = String(company).trim().slice(0, 80);
-      if (photoUrl) guest.photoUrl = String(photoUrl).slice(0, 200);
-      guest.ready = true;
     }
 
     socket.join(`event:${ev.id}`);
     socket.data.role = "guest";
     socket.data.eventId = ev.id;
     socket.data.guestId = guest.id;
-    ack?.({ ok: true, guestId: guest.id, state: guestView(ev, guest.id) });
+    ack?.({
+      ok: true,
+      guestId: guest.id,
+      guestToken: guest.token,
+      state: guestView(ev, guest.id),
+    });
     emitEvent(io, ev);
   });
 
   socket.on("host:settings", ({ eventId, hostToken, settings }, ack) => {
-    const ev = events.get(eventId);
-    if (!ev || ev.hostToken !== hostToken) return ack?.({ ok: false, error: "Нет доступа" });
+    const { ev, error } = requireHost(socket, eventId, hostToken);
+    if (!ev) return ack?.({ ok: false, error });
     if (settings?.totalRounds != null) {
       ev.totalRounds = Math.min(20, Math.max(1, Number(settings.totalRounds) || 5));
     }
@@ -545,8 +656,8 @@ io.on("connection", (socket) => {
   });
 
   socket.on("host:start", ({ eventId, hostToken }, ack) => {
-    const ev = events.get(eventId);
-    if (!ev || ev.hostToken !== hostToken) return ack?.({ ok: false, error: "Нет доступа" });
+    const { ev, error } = requireHost(socket, eventId, hostToken);
+    if (!ev) return ack?.({ ok: false, error });
     if (ev.phase !== "lobby" && ev.phase !== "between") {
       return ack?.({ ok: false, error: "Сейчас нельзя стартовать раунд" });
     }
@@ -557,8 +668,8 @@ io.on("connection", (socket) => {
   });
 
   socket.on("host:stop", ({ eventId, hostToken }, ack) => {
-    const ev = events.get(eventId);
-    if (!ev || ev.hostToken !== hostToken) return ack?.({ ok: false, error: "Нет доступа" });
+    const { ev, error } = requireHost(socket, eventId, hostToken);
+    if (!ev) return ack?.({ ok: false, error });
     clearTimer(ev);
     ev.phase = "lobby";
     ev.round = 0;
@@ -569,8 +680,8 @@ io.on("connection", (socket) => {
   });
 
   socket.on("host:skip", ({ eventId, hostToken }, ack) => {
-    const ev = events.get(eventId);
-    if (!ev || ev.hostToken !== hostToken) return ack?.({ ok: false, error: "Нет доступа" });
+    const { ev, error } = requireHost(socket, eventId, hostToken);
+    if (!ev) return ack?.({ ok: false, error });
     if (ev.phase === "matching") enterSearching(io, ev);
     else if (ev.phase === "searching") {
       for (const p of ev.pairs) if (!p.bye) p.found = true;
@@ -580,9 +691,9 @@ io.on("connection", (socket) => {
     ack?.({ ok: true });
   });
 
-  socket.on("guest:found", ({ eventId, guestId }, ack) => {
-    const ev = events.get(eventId);
-    if (!ev) return ack?.({ ok: false, error: "Нет события" });
+  socket.on("guest:found", ({ eventId }, ack) => {
+    const { ev, guestId, error } = requireGuestSession(socket, eventId);
+    if (!ev) return ack?.({ ok: false, error });
     const pair = findGroupForGuest(ev, guestId);
     if (!pair || pair.bye) return ack?.({ ok: false, error: "Нет группы" });
     if (ev.phase !== "searching") return ack?.({ ok: false, error: "Не фаза поиска" });
@@ -593,9 +704,9 @@ io.on("connection", (socket) => {
     ack?.({ ok: true });
   });
 
-  socket.on("guest:chat", ({ eventId, guestId, text }, ack) => {
-    const ev = events.get(eventId);
-    if (!ev) return ack?.({ ok: false, error: "Нет события" });
+  socket.on("guest:chat", ({ eventId, text }, ack) => {
+    const { ev, guestId, error } = requireGuestSession(socket, eventId);
+    if (!ev) return ack?.({ ok: false, error });
     if (ev.phase !== "searching" && ev.phase !== "networking") {
       return ack?.({ ok: false, error: "Чат доступен в поиске и нетворкинге" });
     }

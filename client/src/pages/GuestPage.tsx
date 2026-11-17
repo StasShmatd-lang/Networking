@@ -9,8 +9,10 @@ import { getSocket } from "../socket";
 export function GuestPage() {
   const { eventId = "" } = useParams();
   const storageKey = `guest:${eventId}`;
+  const tokenKey = `guestToken:${eventId}`;
   const { state, setError, error, chat, setChat, connected } = useEventSocket(eventId, "guest");
   const [guestId, setGuestId] = useState(() => localStorage.getItem(storageKey) || "");
+  const [guestToken, setGuestToken] = useState(() => localStorage.getItem(tokenKey) || "");
   const [name, setName] = useState("");
   const [company, setCompany] = useState("");
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
@@ -24,21 +26,30 @@ export function GuestPage() {
   }, [chat.length]);
 
   useEffect(() => {
-    if (!eventId || !guestId) return;
-    // Rejoin on refresh with stored id
+    if (!eventId || !guestId || !guestToken) return;
+    // Rejoin on refresh with stored id + secret token
     const socket = getSocket();
     socket.emit(
       "guest:join",
-      { eventId, guestId },
-      (ack: { ok: boolean; guestId?: string; error?: string }) => {
+      { eventId, guestId, guestToken },
+      (ack: { ok: boolean; guestId?: string; guestToken?: string; error?: string }) => {
         if (ack?.ok && ack.guestId) {
           setGuestId(ack.guestId);
           localStorage.setItem(storageKey, ack.guestId);
+          if (ack.guestToken) {
+            setGuestToken(ack.guestToken);
+            localStorage.setItem(tokenKey, ack.guestToken);
+          }
           setJoined(true);
+        } else {
+          localStorage.removeItem(storageKey);
+          localStorage.removeItem(tokenKey);
+          setGuestId("");
+          setGuestToken("");
         }
       },
     );
-  }, [eventId, guestId, storageKey]);
+  }, [eventId, guestId, guestToken, storageKey, tokenKey]);
 
   async function onPhoto(file: File | null) {
     if (!file) return;
@@ -63,8 +74,15 @@ export function GuestPage() {
     const socket = getSocket();
     socket.emit(
       "guest:join",
-      { eventId, guestId: guestId || undefined, name, company, photoUrl },
-      (ack: { ok: boolean; guestId?: string; error?: string }) => {
+      {
+        eventId,
+        guestId: guestId || undefined,
+        guestToken: guestToken || undefined,
+        name,
+        company,
+        photoUrl,
+      },
+      (ack: { ok: boolean; guestId?: string; guestToken?: string; error?: string }) => {
         if (!ack?.ok) {
           setError(ack?.error || "Не удалось войти");
           return;
@@ -73,13 +91,17 @@ export function GuestPage() {
           setGuestId(ack.guestId);
           localStorage.setItem(storageKey, ack.guestId);
         }
+        if (ack.guestToken) {
+          setGuestToken(ack.guestToken);
+          localStorage.setItem(tokenKey, ack.guestToken);
+        }
         setJoined(true);
       },
     );
   }
 
   function markFound() {
-    getSocket().emit("guest:found", { eventId, guestId }, (ack: { ok: boolean; error?: string }) => {
+    getSocket().emit("guest:found", { eventId }, (ack: { ok: boolean; error?: string }) => {
       if (!ack?.ok) setError(ack?.error || "Не удалось");
     });
   }
@@ -90,7 +112,7 @@ export function GuestPage() {
     if (!text) return;
     getSocket().emit(
       "guest:chat",
-      { eventId, guestId, text },
+      { eventId, text },
       (ack: {
         ok: boolean;
         message?: { id: string; from: string; fromName?: string; text: string; at: number };

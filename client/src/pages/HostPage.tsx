@@ -29,17 +29,22 @@ export function HostPage() {
 
   useEffect(() => {
     if (!eventId) return;
+    if (!hostToken) {
+      setError("Нет ключа ведущего. Создайте событие с главной страницы.");
+      return;
+    }
     const socket = getSocket();
-    socket.emit("host:join", { eventId, hostToken: hostToken || undefined }, (ack: { ok: boolean; hostToken?: string; error?: string; state?: unknown }) => {
-      if (!ack?.ok) {
-        setError(ack?.error || "Не удалось войти как ведущий");
-        return;
-      }
-      if (ack.hostToken) {
-        setHostToken(ack.hostToken);
-        sessionStorage.setItem(`hostToken:${eventId}`, ack.hostToken);
-      }
-    });
+    socket.emit(
+      "host:join",
+      { eventId, hostToken },
+      (ack: { ok: boolean; error?: string; state?: unknown }) => {
+        if (!ack?.ok) {
+          setError(ack?.error || "Не удалось войти как ведущий");
+          return;
+        }
+        setError(null);
+      },
+    );
   }, [eventId, hostToken, setError]);
 
   useEffect(() => {
