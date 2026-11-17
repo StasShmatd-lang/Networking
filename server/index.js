@@ -105,8 +105,29 @@ function guestPublic(g) {
   };
 }
 
-function pairKey(a, b) {
-  return [a, b].sort().join(":");
+function groupKey(memberIds) {
+  return [...memberIds].sort().join(":");
+}
+
+function pairMembers(p) {
+  if (Array.isArray(p.members) && p.members.length) return p.members;
+  const ids = [p.a, p.b, p.c].filter(Boolean);
+  return [...new Set(ids)];
+}
+
+function findGroupForGuest(ev, guestId) {
+  return ev.pairs.find((p) => pairMembers(p).includes(guestId)) || null;
+}
+
+function serializeMember(ev, id, includePhotos) {
+  const g = ev.guests.get(id);
+  if (!g) return null;
+  return {
+    id: g.id,
+    name: g.name,
+    company: g.company,
+    photoUrl: includePhotos ? g.photoUrl : null,
+  };
 }
 
 function questionForRound(ev) {
@@ -142,26 +163,17 @@ function serializeTimer(ev) {
 
 function serializePairs(ev, { includePhotos = true } = {}) {
   return ev.pairs.map((p) => {
-    const a = ev.guests.get(p.a);
-    const b = ev.guests.get(p.b);
+    const members = pairMembers(p)
+      .map((id) => serializeMember(ev, id, includePhotos))
+      .filter(Boolean);
     return {
       id: p.id,
-      a: a
-        ? {
-            id: a.id,
-            name: a.name,
-            company: a.company,
-            photoUrl: includePhotos ? a.photoUrl : null,
-          }
-        : null,
-      b: b
-        ? {
-            id: b.id,
-            name: b.name,
-            company: b.company,
-            photoUrl: includePhotos ? b.photoUrl : null,
-          }
-        : null,
+      members,
+      // legacy fields for older clients / screenshots
+      a: members[0] || null,
+      b: members[1] || null,
+      c: members[2] || null,
+      size: members.length,
       askerId: p.askerId,
       found: Boolean(p.found),
       bye: Boolean(p.bye),
@@ -192,9 +204,13 @@ function publicState(ev, role = "guest") {
 function guestView(ev, guestId) {
   const base = publicState(ev, "guest");
   const me = ev.guests.get(guestId);
-  const pair = ev.pairs.find((p) => p.a === guestId || p.b === guestId) || null;
-  const partnerId = pair ? (pair.a === guestId ? pair.b : pair.a) : null;
-  const partner = partnerId ? ev.guests.get(partnerId) : null;
+  const pair = findGroupForGuest(ev, guestId);
+  const memberIds = pair ? pairMembers(pair) : [];
+  const partners = memberIds
+    .filter((id) => id !== guestId)
+    .map((id) => ev.guests.get(id))
+    .filter(Boolean)
+    .map(guestPublic);
   const chat = pair ? ev.chat.get(pair.id) || [] : [];
   return {
     ...base,
@@ -202,7 +218,9 @@ function guestView(ev, guestId) {
     pair: pair
       ? {
           id: pair.id,
-          partner: partner ? guestPublic(partner) : null,
+          size: memberIds.length,
+          partner: partners[0] || null,
+          partners,
           askerId: pair.askerId,
           found: Boolean(pair.found),
           bye: Boolean(pair.bye),
@@ -222,46 +240,63 @@ function shuffle(arr) {
   return a;
 }
 
-/** Avoid immediate rematch with same partner when possible */
+function makeGroup(memberIds) {
+  const members = [...memberIds];
+  return {
+    id: nanoid(8),
+    members,
+    a: members[0],
+    b: members[1] || members[0],
+    c: members[2] || null,
+    askerId: members[Math.floor(Math.random() * members.length)],
+    found: false,
+    bye: false,
+  };
+}
+
+/**
+ * Match into pairs; if guest count is odd (≥3), last leftover becomes a triple
+ * instead of sitting out alone.
+ */
 function buildPairs(ev) {
   const ready = [...ev.guests.values()].filter((g) => g.ready);
-  const ids = shuffle(ready.map((g) => g.id));
+  const ids = ready.map((g) => g.id);
   const previous = new Set();
   for (const p of ev.pairs) {
-    if (p.a && p.b) previous.add(pairKey(p.a, p.b));
+    previous.add(groupKey(pairMembers(p)));
   }
 
-  // Try a few shuffles to reduce rematches
   let best = null;
   let bestScore = Infinity;
-  for (let attempt = 0; attempt < 12; attempt++) {
+  for (let attempt = 0; attempt < 16; attempt++) {
     const order = shuffle(ids);
     const pairs = [];
     let rematches = 0;
-    for (let i = 0; i + 1 < order.length; i += 2) {
-      const a = order[i];
-      const b = order[i + 1];
-      if (previous.has(pairKey(a, b))) rematches += 1;
-      pairs.push({
-        id: nanoid(8),
-        a,
-        b,
-        askerId: Math.random() < 0.5 ? a : b,
-        found: false,
-        bye: false,
-      });
+    let i = 0;
+
+    // Odd count → one triple at the end so nobody sits out
+    const useTriple = order.length >= 3 && order.length % 2 === 1;
+    const pairLimit = useTriple ? order.length - 3 : order.length;
+
+    while (i + 1 < pairLimit) {
+      const members = [order[i], order[i + 1]];
+      if (previous.has(groupKey(members))) rematches += 1;
+      pairs.push(makeGroup(members));
+      i += 2;
     }
-    if (order.length % 2 === 1) {
-      const alone = order[order.length - 1];
+    if (useTriple) {
+      const members = order.slice(-3);
+      if (previous.has(groupKey(members))) rematches += 1;
+      pairs.push(makeGroup(members));
+    } else if (order.length === 1) {
+      // Only possible if host started with <2 somehow
       pairs.push({
-        id: nanoid(8),
-        a: alone,
-        b: alone,
-        askerId: alone,
+        ...makeGroup([order[0], order[0]]),
         found: true,
         bye: true,
       });
     }
+
     if (rematches < bestScore) {
       bestScore = rematches;
       best = pairs;
@@ -273,6 +308,13 @@ function buildPairs(ev) {
   ev.chat = new Map();
   for (const p of ev.pairs) {
     ev.chat.set(p.id, []);
+  }
+}
+
+function emitChatToGroup(io, ev, pair, message) {
+  for (const id of pairMembers(pair)) {
+    const g = ev.guests.get(id);
+    if (g?.socketId) io.to(g.socketId).emit("chat", { pairId: pair.id, message });
   }
 }
 
@@ -541,8 +583,8 @@ io.on("connection", (socket) => {
   socket.on("guest:found", ({ eventId, guestId }, ack) => {
     const ev = events.get(eventId);
     if (!ev) return ack?.({ ok: false, error: "Нет события" });
-    const pair = ev.pairs.find((p) => p.a === guestId || p.b === guestId);
-    if (!pair || pair.bye) return ack?.({ ok: false, error: "Нет пары" });
+    const pair = findGroupForGuest(ev, guestId);
+    if (!pair || pair.bye) return ack?.({ ok: false, error: "Нет группы" });
     if (ev.phase !== "searching") return ack?.({ ok: false, error: "Не фаза поиска" });
     pair.found = true;
     emitEvent(io, ev);
@@ -554,12 +596,16 @@ io.on("connection", (socket) => {
   socket.on("guest:chat", ({ eventId, guestId, text }, ack) => {
     const ev = events.get(eventId);
     if (!ev) return ack?.({ ok: false, error: "Нет события" });
-    if (ev.phase !== "searching") return ack?.({ ok: false, error: "Чат только в поиске" });
-    const pair = ev.pairs.find((p) => p.a === guestId || p.b === guestId);
-    if (!pair || pair.bye) return ack?.({ ok: false, error: "Нет пары" });
+    if (ev.phase !== "searching" && ev.phase !== "networking") {
+      return ack?.({ ok: false, error: "Чат доступен в поиске и нетворкинге" });
+    }
+    const pair = findGroupForGuest(ev, guestId);
+    if (!pair || pair.bye) return ack?.({ ok: false, error: "Нет группы" });
+    const fromGuest = ev.guests.get(guestId);
     const msg = {
       id: nanoid(6),
       from: guestId,
+      fromName: fromGuest?.name || "Гость",
       text: String(text || "").trim().slice(0, 280),
       at: Date.now(),
     };
@@ -568,11 +614,7 @@ io.on("connection", (socket) => {
     list.push(msg);
     if (list.length > 80) list.splice(0, list.length - 80);
     ev.chat.set(pair.id, list);
-    const a = ev.guests.get(pair.a);
-    const b = ev.guests.get(pair.b);
-    for (const g of [a, b]) {
-      if (g?.socketId) io.to(g.socketId).emit("chat", { pairId: pair.id, message: msg });
-    }
+    emitChatToGroup(io, ev, pair, msg);
     ack?.({ ok: true, message: msg });
   });
 

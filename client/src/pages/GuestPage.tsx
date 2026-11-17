@@ -91,7 +91,11 @@ export function GuestPage() {
     getSocket().emit(
       "guest:chat",
       { eventId, guestId, text },
-      (ack: { ok: boolean; message?: { id: string; from: string; text: string; at: number }; error?: string }) => {
+      (ack: {
+        ok: boolean;
+        message?: { id: string; from: string; fromName?: string; text: string; at: number };
+        error?: string;
+      }) => {
         if (!ack?.ok) {
           setError(ack?.error || "Чат недоступен");
           return;
@@ -104,7 +108,9 @@ export function GuestPage() {
 
   const me = state?.me;
   const pair = state?.pair;
+  const partners = pair?.partners?.length ? pair.partners : pair?.partner ? [pair.partner] : [];
   const phase = state?.phase || "lobby";
+  const isTriple = (pair?.size || partners.length + 1) >= 3;
 
   if (!joined || !me) {
     return (
@@ -201,14 +207,28 @@ export function GuestPage() {
           ) : (
             <>
               <div className="panel text-center">
-                <p className="text-sm uppercase tracking-[0.18em] text-mute">Ваша пара</p>
-                <div className="mt-4 flex items-center justify-center gap-4">
-                  <Avatar guest={me} size={72} />
-                  <span className="display text-2xl text-gold">×</span>
-                  <Avatar guest={pair.partner} size={72} />
+                <p className="text-sm uppercase tracking-[0.18em] text-mute">
+                  {isTriple ? "Ваша тройка" : "Ваша пара"}
+                </p>
+                <div className="mt-4 flex flex-wrap items-start justify-center gap-3">
+                  <div className="flex flex-col items-center gap-1">
+                    <Avatar guest={me} size={72} />
+                    <span className="max-w-[5.5rem] truncate text-xs text-mute">вы</span>
+                  </div>
+                  {partners.map((p) => (
+                    <div key={p.id} className="flex items-start gap-3">
+                      <span className="display pt-5 text-2xl text-gold">×</span>
+                      <div className="flex flex-col items-center gap-1">
+                        <Avatar guest={p} size={72} />
+                        <span className="max-w-[6.5rem] truncate text-sm font-semibold text-mist">{p.name}</span>
+                        <span className="max-w-[6.5rem] truncate text-xs text-mute">{p.company}</span>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-                <h1 className="display mt-4 text-2xl text-mist">{pair.partner?.name}</h1>
-                <p className="text-mute">{pair.partner?.company}</p>
+                <p className="mt-4 text-sm text-mute">
+                  На телефоне видно фото {isTriple ? "обоих партнёров" : "партнёра"} — так проще найти в зале.
+                </p>
               </div>
 
               {state?.timer && (
@@ -219,14 +239,21 @@ export function GuestPage() {
 
               {phase === "searching" && (
                 <div className="panel space-y-3">
-                  <h2 className="display text-lg text-gold-bright">Найдите друг друга</h2>
-                  <p className="text-sm text-mute">Напишите ориентир в чат — где стоите, во что одеты.</p>
+                  <h2 className="display text-lg text-gold-bright">
+                    {isTriple ? "Найдите троих" : "Найдите друг друга"}
+                  </h2>
+                  <p className="text-sm text-mute">Чат группы: где стоите, во что одеты.</p>
                   <div className="max-h-48 space-y-2 overflow-y-auto rounded-xl bg-lift/60 p-3">
                     {chat.map((m) => (
                       <div
                         key={m.id}
-                        className={`rounded-lg px-3 py-2 text-sm ${m.from === me.id ? "ml-8 bg-gold/20 text-mist" : "mr-8 bg-panel text-mist"}`}
+                        className={`rounded-lg px-3 py-2 text-sm ${m.from === me.id ? "ml-6 bg-gold/20 text-mist" : "mr-6 bg-panel text-mist"}`}
                       >
+                        {m.from !== me.id && (
+                          <div className="mb-0.5 text-[11px] font-semibold text-gold-bright">
+                            {m.fromName || "Партнёр"}
+                          </div>
+                        )}
                         {m.text}
                       </div>
                     ))}
@@ -249,20 +276,52 @@ export function GuestPage() {
                     disabled={pair.found}
                     onClick={markFound}
                   >
-                    {pair.found ? "Ждём остальных…" : "Нашли друг друга"}
+                    {pair.found ? "Ждём остальные группы…" : isTriple ? "Нашли всех троих" : "Нашли друг друга"}
                   </button>
                 </div>
               )}
 
               {phase === "networking" && (
-                <div className="panel space-y-3 text-center">
-                  <p className="text-sm uppercase tracking-[0.18em] text-mute">Вопрос раунда</p>
-                  <h2 className="display text-xl leading-snug text-gold-bright">{state?.question}</h2>
-                  <p className="rounded-xl bg-lift/70 px-4 py-3 text-sm text-mist">
-                    {pair.amAsker
-                      ? "В первой половине таймера вопрос задаёте вы."
-                      : "В первой половине таймера вопрос задаёт партнёр — слушайте, потом ваш ход."}
-                  </p>
+                <div className="panel space-y-3">
+                  <div className="text-center">
+                    <p className="text-sm uppercase tracking-[0.18em] text-mute">Вопрос раунда</p>
+                    <h2 className="display mt-2 text-xl leading-snug text-gold-bright">{state?.question}</h2>
+                    <p className="mt-3 rounded-xl bg-lift/70 px-4 py-3 text-sm text-mist">
+                      {pair.amAsker
+                        ? "В первой половине таймера вопрос задаёте вы."
+                        : "В первой половине таймера вопрос задаёт партнёр из группы — потом ваш ход."}
+                    </p>
+                  </div>
+                  <div className="border-t border-[var(--line)] pt-3">
+                    <h3 className="mb-2 text-sm font-semibold text-gold-bright">Чат группы</h3>
+                    <div className="max-h-40 space-y-2 overflow-y-auto rounded-xl bg-lift/60 p-3">
+                      {chat.map((m) => (
+                        <div
+                          key={m.id}
+                          className={`rounded-lg px-3 py-2 text-sm ${m.from === me.id ? "ml-6 bg-gold/20 text-mist" : "mr-6 bg-panel text-mist"}`}
+                        >
+                          {m.from !== me.id && (
+                            <div className="mb-0.5 text-[11px] font-semibold text-gold-bright">
+                              {m.fromName || "Партнёр"}
+                            </div>
+                          )}
+                          {m.text}
+                        </div>
+                      ))}
+                      <div ref={chatEnd} />
+                    </div>
+                    <form className="mt-2 flex gap-2" onSubmit={sendChat}>
+                      <input
+                        className="field flex-1"
+                        value={chatText}
+                        onChange={(e) => setChatText(e.target.value)}
+                        placeholder="Заметка или контакт…"
+                      />
+                      <button type="submit" className="btn-ghost px-4">
+                        →
+                      </button>
+                    </form>
+                  </div>
                 </div>
               )}
             </>

@@ -10,8 +10,11 @@ export type Guest = {
 
 export type PairView = {
   id: string;
+  members?: Guest[];
   a: Guest | null;
   b: Guest | null;
+  c?: Guest | null;
+  size?: number;
   askerId: string;
   found: boolean;
   bye: boolean;
@@ -27,6 +30,7 @@ export type TimerState = {
 export type ChatMessage = {
   id: string;
   from: string;
+  fromName?: string;
   text: string;
   at: number;
 };
@@ -48,7 +52,9 @@ export type EventState = {
   me?: Guest | null;
   pair?: {
     id: string;
+    size: number;
     partner: Guest | null;
+    partners: Guest[];
     askerId: string;
     found: boolean;
     bye: boolean;
