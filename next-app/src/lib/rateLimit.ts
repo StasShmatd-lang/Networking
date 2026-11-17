@@ -1,3 +1,5 @@
+import { tokenFingerprint } from "./auth";
+
 type Bucket = { n: number; reset: number };
 const g = globalThis as unknown as { __rate?: Map<string, Bucket> };
 g.__rate ??= new Map();
@@ -13,5 +15,13 @@ export function rateLimit(key: string, max: number, windowMs: number) {
 
 export function clientIp(req: Request) {
   const xf = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return xf || "unknown";
+  const real = req.headers.get("x-real-ip")?.trim();
+  return real || xf || "unknown";
+}
+
+/** Prefer secret fingerprint so spoofed IPs cannot share one bucket. */
+export function requestLimitKey(req: Request, scope: string, secret?: string) {
+  const ip = clientIp(req);
+  if (secret) return `${scope}:tok:${tokenFingerprint(secret)}`;
+  return `${scope}:ip:${ip}`;
 }

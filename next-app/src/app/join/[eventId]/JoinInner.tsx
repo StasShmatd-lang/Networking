@@ -50,12 +50,12 @@ export default function JoinInner() {
     setGuestToken(localStorage.getItem(tokenKey) || "");
   }, [accessKeyFromUrl, accessKeyStorage, storageKey, tokenKey]);
 
-  const pollQuery = useMemo(() => {
+  const pollAuth = useMemo(() => {
     if (!joined || !guestId || !guestToken) return null;
-    return `eventId=${encodeURIComponent(eventId)}&role=guest&guestId=${encodeURIComponent(guestId)}&guestToken=${encodeURIComponent(guestToken)}`;
+    return { eventId, role: "guest" as const, token: guestToken, guestId };
   }, [joined, guestId, guestToken, eventId]);
 
-  const { state, error, setError, setState } = usePollState(pollQuery, joined);
+  const { state, error, setError, setState } = usePollState(pollAuth, joined);
 
   useEffect(() => {
     const chat = (state?.chat as ChatMsg[] | undefined) || [];
@@ -165,8 +165,12 @@ export default function JoinInner() {
   async function markFound() {
     const res = await fetch("/api/guest/found", {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ eventId, guestId, guestToken }),
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${guestToken}`,
+        "x-guest-id": guestId,
+      },
+      body: JSON.stringify({ eventId, guestId }),
     });
     const data = await readJson<{ ok?: boolean; error?: string; state?: Record<string, unknown> }>(res);
     if (!res.ok || data.error) setError(data.error || "Не удалось");
@@ -179,8 +183,12 @@ export default function JoinInner() {
     if (!text) return;
     const res = await fetch("/api/guest/chat", {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ eventId, guestId, guestToken, text }),
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${guestToken}`,
+        "x-guest-id": guestId,
+      },
+      body: JSON.stringify({ eventId, guestId, text }),
     });
     const data = await readJson<{ ok?: boolean; error?: string; state?: Record<string, unknown> }>(res);
     if (!res.ok || data.error) {

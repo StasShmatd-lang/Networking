@@ -23,7 +23,7 @@ body {
 
 body {
   margin: 0;
-  font-family: "Figtree", system-ui, sans-serif;
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   background:
     radial-gradient(1200px 700px at 12% -10%, rgba(201, 166, 107, 0.16), transparent 55%),
     radial-gradient(900px 500px at 90% 10%, rgba(42, 157, 143, 0.12), transparent 50%),
@@ -47,7 +47,7 @@ body {
   @apply block h-10 w-auto object-contain md:h-12;
 }
 .display {
-  font-family: "Unbounded", system-ui, sans-serif;
+  font-family: "Trebuchet MS", "Segoe UI", Arial, sans-serif;
   letter-spacing: -0.03em;
 }
 .btn {

@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 export async function POST(req: Request) {
   try {
     const ip = clientIp(req);
-    if (!rateLimit(`event:${ip}`, 5, 60_000)) return err("Слишком много событий", 429);
+    if (!rateLimit(`event:${ip}`, 3, 60_000)) return err("Слишком много событий", 429);
     await pruneOld();
     const ev = await createEvent();
     return json({
@@ -17,7 +17,8 @@ export async function POST(req: Request) {
       screenToken: ev.screenToken,
       joinPath: `/join/${ev.id}?k=${ev.guestAccessToken}`,
       hostPath: `/host/${ev.id}`,
-      screenPath: `/screen/${ev.id}?s=${ev.screenToken}`,
+      // Hash keeps screen token out of access logs / Referer for the page request
+      screenPath: `/screen/${ev.id}#s=${ev.screenToken}`,
     });
   } catch (e) {
     return err(e instanceof Error ? e.message : "Ошибка", 500);

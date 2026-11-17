@@ -25,9 +25,19 @@ export default function ScreenInner() {
   const [base, setBase] = useState("");
 
   useEffect(() => {
-    const s = search.get("s") || sessionStorage.getItem(`screenToken:${eventId}`) || "";
+    const fromQuery = search.get("s") || "";
+    const hash = typeof window !== "undefined" ? window.location.hash.replace(/^#/, "") : "";
+    const fromHash = hash.startsWith("s=") ? decodeURIComponent(hash.slice(2)) : new URLSearchParams(hash).get("s") || "";
+    const s = fromHash || fromQuery || sessionStorage.getItem(`screenToken:${eventId}`) || "";
     if (s) sessionStorage.setItem(`screenToken:${eventId}`, s);
     setScreenToken(s);
+    // Drop query token from address bar so it is not stuck in history/Referer
+    if (fromQuery && typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("s");
+      url.hash = `s=${encodeURIComponent(s)}`;
+      window.history.replaceState(null, "", `${url.pathname}${url.search}#s=${encodeURIComponent(s)}`);
+    }
   }, [eventId, search]);
 
   useEffect(() => {
@@ -37,10 +47,8 @@ export default function ScreenInner() {
       .catch(() => setBase(window.location.origin));
   }, []);
 
-  const q = screenToken
-    ? `eventId=${encodeURIComponent(eventId)}&role=screen&screenToken=${encodeURIComponent(screenToken)}`
-    : null;
-  const { state, error } = usePollState(q, Boolean(screenToken));
+  const pollAuth = screenToken ? { eventId, role: "screen" as const, token: screenToken } : null;
+  const { state, error } = usePollState(pollAuth, Boolean(screenToken));
 
   const joinUrl = useMemo(() => {
     const k = state?.guestAccessToken;

@@ -13,8 +13,8 @@ export default function HostPage() {
   const [hostToken] = useState(() =>
     typeof window !== "undefined" ? sessionStorage.getItem(`hostToken:${eventId}`) || "" : "",
   );
-  const q = hostToken ? `eventId=${eventId}&role=host&hostToken=${encodeURIComponent(hostToken)}` : null;
-  const { state, error, setError } = usePollState(q, Boolean(hostToken));
+  const pollAuth = hostToken ? { eventId, role: "host" as const, token: hostToken } : null;
+  const { state, error, setError } = usePollState(pollAuth, Boolean(hostToken));
   const [msg, setMsg] = useState<string | null>(null);
   const [questionsText, setQuestionsText] = useState("");
   const [totalRounds, setTotalRounds] = useState(5);
@@ -49,14 +49,17 @@ export default function HostPage() {
 
   const screenUrl = useMemo(() => {
     const s = String(state?.screenToken || (typeof window !== "undefined" ? sessionStorage.getItem(`screenToken:${eventId}`) : "") || "");
-    return s ? `${base}/screen/${eventId}?s=${encodeURIComponent(s)}` : `${base}/screen/${eventId}`;
+    return s ? `${base}/screen/${eventId}#s=${encodeURIComponent(s)}` : `${base}/screen/${eventId}`;
   }, [base, eventId, state?.screenToken]);
 
   async function act(action: string, settings?: object) {
     const res = await fetch("/api/host", {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ eventId, hostToken, action, settings }),
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${hostToken}`,
+      },
+      body: JSON.stringify({ eventId, action, settings }),
     });
     const data = await readJson<{ ok?: boolean; error?: string }>(res);
     setMsg(data.ok ? "Готово" : data.error || "Ошибка");

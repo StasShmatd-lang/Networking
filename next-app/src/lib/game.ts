@@ -57,16 +57,23 @@ function buildPairs(ev: EventData) {
   for (const p of pairs) ev.chat[p.id] = [];
 }
 
-function advanceTimers(ev: EventData) {
-  if (!ev.timer.endsAt || Date.now() < ev.timer.endsAt) return;
+const MAX_EVENT_JSON_BYTES = 6_000_000;
+
+/** Returns true when phase/timer actually changed. */
+function advanceTimers(ev: EventData): boolean {
+  if (!ev.timer.endsAt || Date.now() < ev.timer.endsAt) return false;
   if (ev.phase === "matching") {
     ev.phase = "searching";
     ev.timer = { kind: "search", endsAt: Date.now() + ev.searchSec * 1000, totalSec: ev.searchSec };
-  } else if (ev.phase === "searching") {
+    return true;
+  }
+  if (ev.phase === "searching") {
     for (const p of ev.pairs) if (!p.bye) p.found = true;
     ev.phase = "networking";
     ev.timer = { kind: "network", endsAt: Date.now() + ev.networkSec * 1000, totalSec: ev.networkSec };
-  } else if (ev.phase === "networking") {
+    return true;
+  }
+  if (ev.phase === "networking") {
     ev.timer = { kind: null, endsAt: null, totalSec: 0 };
     if (ev.round >= ev.totalRounds) {
       ev.phase = "done";
@@ -75,22 +82,30 @@ function advanceTimers(ev: EventData) {
       ev.phase = "between";
       ev.pairs = [];
     }
+    return true;
   }
+  return false;
 }
 
 export async function loadEvent(id: string): Promise<EventData | null> {
   const rows = await sql<{ data: EventData }>("select data from events where id = $1", [id]);
   if (!rows[0]) return null;
-  const ev = rows[0].data;
-  advanceTimers(ev);
-  return ev;
+  return rows[0].data;
+}
+
+export async function loadEventTicked(id: string): Promise<{ ev: EventData; dirty: boolean } | null> {
+  const ev = await loadEvent(id);
+  if (!ev) return null;
+  return { ev, dirty: advanceTimers(ev) };
 }
 
 export async function saveEvent(ev: EventData) {
+  const raw = JSON.stringify(ev);
+  if (raw.length > MAX_EVENT_JSON_BYTES) throw new Error("Событие слишком большое");
   await sql(
     `insert into events (id, data, updated_at) values ($1, $2::jsonb, now())
      on conflict (id) do update set data = excluded.data, updated_at = now()`,
-    [ev.id, JSON.stringify(ev)],
+    [ev.id, raw],
   );
 }
 
@@ -219,8 +234,9 @@ export async function hostAction(
   action: string,
   settings?: Partial<{ totalRounds: number; searchSec: number; networkSec: number; questions: string[] }>,
 ) {
-  const ev = await loadEvent(eventId);
-  if (!ev || ev.hostToken !== hostToken) throw new Error("Нет доступа");
+  const loaded = await loadEventTicked(eventId);
+  if (!loaded || loaded.ev.hostToken !== hostToken) throw new Error("Нет доступа");
+  const ev = loaded.ev;
   if (action === "settings" && settings) {
     if (settings.totalRounds != null) ev.totalRounds = Math.min(20, Math.max(1, Number(settings.totalRounds) || 5));
     if (settings.searchSec != null) ev.searchSec = Math.min(600, Math.max(15, Number(settings.searchSec) || 90));
@@ -276,8 +292,9 @@ export async function guestJoin(
     photoUrl?: string | null;
   },
 ) {
-  const ev = await loadEvent(eventId);
-  if (!ev) throw new Error("Событие не найдено");
+  const loaded = await loadEventTicked(eventId);
+  if (!loaded) throw new Error("Событие не найдено");
+  const ev = loaded.ev;
   let guest = input.guestId ? ev.guests.find((g) => g.id === input.guestId) : undefined;
   if (guest) {
     if (!input.guestToken || input.guestToken !== guest.token) throw new Error("Нет доступа к профилю");
@@ -312,8 +329,9 @@ export async function guestJoin(
 }
 
 export async function guestFound(eventId: string, guestId: string, guestToken: string) {
-  const ev = await loadEvent(eventId);
-  if (!ev) throw new Error("Событие не найдено");
+  const loaded = await loadEventTicked(eventId);
+  if (!loaded) throw new Error("Событие не найдено");
+  const ev = loaded.ev;
   const guest = ev.guests.find((g) => g.id === guestId);
   if (!guest || guest.token !== guestToken) throw new Error("Нет сессии");
   if (ev.phase !== "searching") throw new Error("Не фаза поиска");
@@ -329,8 +347,9 @@ export async function guestFound(eventId: string, guestId: string, guestToken: s
 }
 
 export async function guestChat(eventId: string, guestId: string, guestToken: string, text: string) {
-  const ev = await loadEvent(eventId);
-  if (!ev) throw new Error("Событие не найдено");
+  const loaded = await loadEventTicked(eventId);
+  if (!loaded) throw new Error("Событие не найдено");
+  const ev = loaded.ev;
   const guest = ev.guests.find((g) => g.id === guestId);
   if (!guest || guest.token !== guestToken) throw new Error("Нет сессии");
   if (ev.phase !== "searching" && ev.phase !== "networking") throw new Error("Чат недоступен");
@@ -357,21 +376,22 @@ export async function getState(
   role: "host" | "guest" | "screen",
   tokens: { hostToken?: string; screenToken?: string; guestId?: string; guestToken?: string },
 ) {
-  const ev = await loadEvent(eventId);
-  if (!ev) throw new Error("Событие не найдено");
+  const loaded = await loadEventTicked(eventId);
+  if (!loaded) throw new Error("Событие не найдено");
+  const { ev, dirty } = loaded;
   if (role === "host") {
     if (!tokens.hostToken || tokens.hostToken !== ev.hostToken) throw new Error("Нет доступа");
-    await saveEvent(ev); // persist timer advances
+    if (dirty) await saveEvent(ev);
     return publicState(ev, "host");
   }
   if (role === "screen") {
     if (!tokens.screenToken || tokens.screenToken !== ev.screenToken) throw new Error("Нет доступа");
-    await saveEvent(ev);
+    if (dirty) await saveEvent(ev);
     return publicState(ev, "screen");
   }
   if (!tokens.guestId || !tokens.guestToken) throw new Error("Нет сессии");
   const guest = ev.guests.find((g) => g.id === tokens.guestId);
   if (!guest || guest.token !== tokens.guestToken) throw new Error("Нет доступа");
-  await saveEvent(ev);
+  if (dirty) await saveEvent(ev);
   return publicState(ev, "guest", guest.id);
 }
