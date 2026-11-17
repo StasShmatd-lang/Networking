@@ -49,6 +49,7 @@ export type EventState = {
   pairs: PairView[];
   timer: TimerState;
   role?: string;
+  guestAccessToken?: string;
   me?: Guest | null;
   pair?: {
     id: string;

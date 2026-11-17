@@ -21,7 +21,11 @@ export function ScreenPage() {
   const { eventId = "" } = useParams();
   const base = useLinkBase();
   const { state, connected } = useEventSocket(eventId, "screen");
-  const joinUrl = useMemo(() => (eventId ? `${base}/join/${eventId}` : ""), [base, eventId]);
+  const joinUrl = useMemo(() => {
+    if (!eventId) return "";
+    const k = state?.guestAccessToken;
+    return k ? `${base}/join/${eventId}?k=${encodeURIComponent(k)}` : "";
+  }, [base, eventId, state?.guestAccessToken]);
 
   useEffect(() => {
     if (!eventId) return;

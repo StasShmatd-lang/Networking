@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { Avatar } from "../components/Avatar";
 import { BrandFooter } from "../components/BrandFooter";
 import { TimerDisplay } from "../components/TimerDisplay";
@@ -8,9 +8,15 @@ import { getSocket } from "../socket";
 
 export function GuestPage() {
   const { eventId = "" } = useParams();
+  const [search] = useSearchParams();
+  const accessKeyFromUrl = search.get("k") || "";
+  const accessKeyStorage = `guestAccess:${eventId}`;
   const storageKey = `guest:${eventId}`;
   const tokenKey = `guestToken:${eventId}`;
   const { state, setError, error, chat, setChat, connected } = useEventSocket(eventId, "guest");
+  const [accessKey, setAccessKey] = useState(
+    () => accessKeyFromUrl || localStorage.getItem(accessKeyStorage) || "",
+  );
   const [guestId, setGuestId] = useState(() => localStorage.getItem(storageKey) || "");
   const [guestToken, setGuestToken] = useState(() => localStorage.getItem(tokenKey) || "");
   const [name, setName] = useState("");
@@ -20,6 +26,13 @@ export function GuestPage() {
   const [chatText, setChatText] = useState("");
   const [joined, setJoined] = useState(false);
   const chatEnd = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (accessKeyFromUrl) {
+      setAccessKey(accessKeyFromUrl);
+      localStorage.setItem(accessKeyStorage, accessKeyFromUrl);
+    }
+  }, [accessKeyFromUrl, accessKeyStorage]);
 
   useEffect(() => {
     chatEnd.current?.scrollIntoView({ behavior: "smooth" });
@@ -53,12 +66,17 @@ export function GuestPage() {
 
   async function onPhoto(file: File | null) {
     if (!file) return;
+    if (!accessKey) {
+      setError("Откройте страницу по QR — без ключа фото не загрузить");
+      return;
+    }
     setUploading(true);
     setError(null);
     try {
       const fd = new FormData();
       fd.append("photo", file);
-      const res = await fetch("/api/upload", { method: "POST", body: fd });
+      const q = new URLSearchParams({ eventId, accessKey });
+      const res = await fetch(`/api/upload?${q}`, { method: "POST", body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Загрузка не удалась");
       setPhotoUrl(data.photoUrl);
@@ -71,6 +89,10 @@ export function GuestPage() {
 
   function register(e: FormEvent) {
     e.preventDefault();
+    if (!accessKey && !guestToken) {
+      setError("Откройте ссылку из QR события");
+      return;
+    }
     const socket = getSocket();
     socket.emit(
       "guest:join",
@@ -78,6 +100,7 @@ export function GuestPage() {
         eventId,
         guestId: guestId || undefined,
         guestToken: guestToken || undefined,
+        accessKey: accessKey || undefined,
         name,
         company,
         photoUrl,
@@ -143,6 +166,11 @@ export function GuestPage() {
             <h1 className="display text-3xl font-semibold text-mist">Вход в зал</h1>
             <p className="mt-2 text-mute">Фото, имя и компания — и вы в игре.</p>
           </div>
+          {!accessKey && (
+            <p className="rounded-xl border border-signal/40 bg-signal/10 px-4 py-3 text-sm text-signal">
+              Откройте эту страницу по QR с экрана зала — иначе вход и фото недоступны.
+            </p>
+          )}
           <form className="space-y-4" onSubmit={register}>
             <label className="block">
               <span className="label">Фото</span>

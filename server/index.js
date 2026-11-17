@@ -92,12 +92,18 @@ const ALLOWED_IMAGE_MIME = {
   "image/webp": ".webp",
 };
 
-function safePhotoUrl(url) {
+function safePhotoUrl(url, eventId) {
   if (!url || typeof url !== "string") return null;
   const trimmed = url.trim();
-  if (!/^\/uploads\/[A-Za-z0-9_-]+\.(jpe?g|png|webp)$/i.test(trimmed)) return null;
-  return trimmed;
+  // Prefer event-scoped paths; allow legacy flat uploads only in same event folder form
+  const scoped = new RegExp(`^/uploads/${eventId}/[A-Za-z0-9_-]+\\.(jpe?g|png|webp)$`, "i");
+  if (eventId && scoped.test(trimmed)) return trimmed;
+  return null;
 }
+
+const EVENT_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_UPLOADS_PER_EVENT = 80;
+const MAX_EVENTS = 80;
 
 function clientLanOrigins() {
   const out = [];
@@ -127,6 +133,7 @@ function createEvent() {
   const ev = {
     id,
     hostToken: nanoid(16),
+    guestAccessToken: nanoid(18),
     phase: "lobby",
     round: 0,
     totalRounds: 5,
@@ -137,10 +144,31 @@ function createEvent() {
     pairs: [],
     chat: new Map(),
     timer: { kind: null, endsAt: null, totalSec: 0 },
+    uploadCount: 0,
     createdAt: Date.now(),
   };
+  fs.mkdirSync(path.join(UPLOADS, id), { recursive: true });
   events.set(id, ev);
   return ev;
+}
+
+function purgeEventFiles(eventId) {
+  const dir = path.join(UPLOADS, eventId);
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // ignore
+  }
+}
+
+function pruneExpiredEvents() {
+  const now = Date.now();
+  for (const [id, ev] of events) {
+    if (now - ev.createdAt > EVENT_TTL_MS) {
+      events.delete(id);
+      purgeEventFiles(id);
+    }
+  }
 }
 
 function guestPublic(g) {
@@ -232,7 +260,7 @@ function serializePairs(ev, { includePhotos = true } = {}) {
 function publicState(ev, role = "guest") {
   const includePhotos = role !== "screen" || ev.phase === "searching" || ev.phase === "matching" || ev.phase === "lobby";
   const screenPairsNoFaces = role === "screen" && ev.phase === "networking";
-  return {
+  const base = {
     id: ev.id,
     phase: ev.phase,
     round: ev.round,
@@ -247,6 +275,11 @@ function publicState(ev, role = "guest") {
     timer: serializeTimer(ev),
     role,
   };
+  // Join key is already on the projected QR; host/screen need it to build links
+  if (role === "host" || role === "screen") {
+    base.guestAccessToken = ev.guestAccessToken;
+  }
+  return base;
 }
 
 function guestView(ev, guestId) {
@@ -443,25 +476,6 @@ app.use(
 );
 app.use("/brand", express.static(path.join(ROOT, "brand")));
 
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOADS),
-  filename: (_req, file, cb) => {
-    const ext = ALLOWED_IMAGE_MIME[file.mimetype] || ".jpg";
-    cb(null, `${nanoid(12)}${ext}`);
-  },
-});
-const upload = multer({
-  storage,
-  limits: { fileSize: 2 * 1024 * 1024, files: 1 },
-  fileFilter: (_req, file, cb) => {
-    if (!ALLOWED_IMAGE_MIME[file.mimetype]) {
-      cb(new Error("Только JPEG, PNG или WebP"));
-      return;
-    }
-    cb(null, true);
-  },
-});
-
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, events: events.size });
 });
@@ -475,40 +489,86 @@ app.get("/api/link-base", (req, res) => {
 
 app.post("/api/events", (req, res) => {
   const ip = clientIp(req);
-  if (!rateLimit(`event:${ip}`, 10, 60_000)) {
+  if (!rateLimit(`event:${ip}`, 5, 60_000)) {
     return res.status(429).json({ error: "Слишком много событий, подождите минуту" });
   }
-  // Cap live events in memory
-  if (events.size >= 200) {
+  pruneExpiredEvents();
+  if (events.size >= MAX_EVENTS) {
     return res.status(503).json({ error: "Сервер занят, попробуйте позже" });
   }
   const ev = createEvent();
   res.json({
     id: ev.id,
     hostToken: ev.hostToken,
-    joinPath: `/join/${ev.id}`,
+    guestAccessToken: ev.guestAccessToken,
+    joinPath: `/join/${ev.id}?k=${ev.guestAccessToken}`,
     hostPath: `/host/${ev.id}`,
     screenPath: `/screen/${ev.id}`,
   });
 });
 
+/** Public REST: no guest PII — sockets carry live details after auth */
 app.get("/api/events/:id", (req, res) => {
   const ev = events.get(req.params.id);
   if (!ev) return res.status(404).json({ error: "Событие не найдено" });
-  res.json(publicState(ev, "guest"));
+  res.json({
+    id: ev.id,
+    phase: ev.phase,
+    round: ev.round,
+    totalRounds: ev.totalRounds,
+    guestCount: ev.guests.size,
+  });
 });
 
 app.post("/api/upload", (req, res) => {
   const ip = clientIp(req);
-  if (!rateLimit(`upload:${ip}`, 30, 60_000)) {
+  if (!rateLimit(`upload:${ip}`, 20, 60_000)) {
     return res.status(429).json({ error: "Слишком много загрузок" });
   }
-  upload.single("photo")(req, res, (err) => {
+
+  const eventId = String(req.query.eventId || "");
+  const accessKey = String(req.query.accessKey || "");
+  const ev = events.get(eventId);
+  if (!ev || !accessKey || accessKey !== ev.guestAccessToken) {
+    return res.status(401).json({ error: "Нужен ключ события из QR" });
+  }
+  if (ev.phase !== "lobby" && ev.phase !== "between") {
+    return res.status(403).json({ error: "Загрузка только до старта или в паузе" });
+  }
+  if (ev.uploadCount >= MAX_UPLOADS_PER_EVENT) {
+    return res.status(429).json({ error: "Лимит фото для события" });
+  }
+
+  const dir = path.join(UPLOADS, eventId);
+  fs.mkdirSync(dir, { recursive: true });
+  const up = multer({
+    storage: multer.diskStorage({
+      destination: (_req, _file, cb) => cb(null, dir),
+      filename: (_req, file, cb) => {
+        const ext = ALLOWED_IMAGE_MIME[file.mimetype] || ".jpg";
+        cb(null, `${nanoid(12)}${ext}`);
+      },
+    }),
+    limits: { fileSize: 2 * 1024 * 1024, files: 1 },
+    fileFilter: (_req, file, cb) => {
+      if (!ALLOWED_IMAGE_MIME[file.mimetype]) {
+        cb(new Error("Только JPEG, PNG или WebP"));
+        return;
+      }
+      cb(null, true);
+    },
+  }).single("photo");
+
+  up(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message || "Ошибка загрузки" });
     if (!req.file) return res.status(400).json({ error: "Нет файла" });
-    res.json({ photoUrl: `/uploads/${req.file.filename}` });
+    ev.uploadCount += 1;
+    res.json({ photoUrl: `/uploads/${eventId}/${req.file.filename}` });
   });
 });
+
+// Periodic retention
+setInterval(pruneExpiredEvents, 15 * 60 * 1000);
 
 if (fs.existsSync(CLIENT_DIST)) {
   app.use(express.static(CLIENT_DIST));
@@ -587,7 +647,7 @@ io.on("connection", (socket) => {
     socket.emit("state", publicState(ev, "screen"));
   });
 
-  socket.on("guest:join", ({ eventId, guestId, guestToken, name, company, photoUrl }, ack) => {
+  socket.on("guest:join", ({ eventId, guestId, guestToken, accessKey, name, company, photoUrl }, ack) => {
     const ev = events.get(eventId);
     if (!ev) return ack?.({ ok: false, error: "Событие не найдено" });
 
@@ -599,10 +659,13 @@ io.on("connection", (socket) => {
       guest.socketId = socket.id;
       if (name) guest.name = String(name).trim().slice(0, 60);
       if (company) guest.company = String(company).trim().slice(0, 80);
-      const photo = safePhotoUrl(photoUrl);
+      const photo = safePhotoUrl(photoUrl, eventId);
       if (photo) guest.photoUrl = photo;
       guest.ready = true;
     } else {
+      if (!accessKey || accessKey !== ev.guestAccessToken) {
+        return ack?.({ ok: false, error: "Откройте ссылку из QR события" });
+      }
       if (ev.phase !== "lobby" && ev.phase !== "between") {
         return ack?.({ ok: false, error: "Регистрация закрыта — дождитесь паузы между раундами" });
       }
@@ -617,7 +680,7 @@ io.on("connection", (socket) => {
         token: nanoid(18),
         name: nm,
         company: co,
-        photoUrl: safePhotoUrl(photoUrl),
+        photoUrl: safePhotoUrl(photoUrl, eventId),
         ready: true,
         socketId: socket.id,
       };

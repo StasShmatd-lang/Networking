@@ -55,7 +55,10 @@ export function HostPage() {
     setNetworkSec(state.networkSec);
   }, [state?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const joinUrl = useMemo(() => `${base}/join/${eventId}`, [base, eventId]);
+  const joinUrl = useMemo(() => {
+    const k = state?.guestAccessToken;
+    return k ? `${base}/join/${eventId}?k=${encodeURIComponent(k)}` : `${base}/join/${eventId}`;
+  }, [base, eventId, state?.guestAccessToken]);
   const screenUrl = useMemo(() => `${base}/screen/${eventId}`, [base, eventId]);
 
   function saveSettings() {
