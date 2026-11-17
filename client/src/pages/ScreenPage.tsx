@@ -1,9 +1,11 @@
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { useParams } from "react-router-dom";
 import { FlyingAvatars } from "../components/FlyingAvatars";
+import { HallQr } from "../components/HallQr";
 import { PairBoard } from "../components/PairBoard";
 import { TimerDisplay } from "../components/TimerDisplay";
 import { useEventSocket } from "../hooks/useEventSocket";
+import { useLinkBase } from "../hooks/useLinkBase";
 import { getSocket } from "../socket";
 
 const PHASE_TITLE: Record<string, string> = {
@@ -17,7 +19,9 @@ const PHASE_TITLE: Record<string, string> = {
 
 export function ScreenPage() {
   const { eventId = "" } = useParams();
+  const base = useLinkBase();
   const { state, connected } = useEventSocket(eventId, "screen");
+  const joinUrl = useMemo(() => (eventId ? `${base}/join/${eventId}` : ""), [base, eventId]);
 
   useEffect(() => {
     if (!eventId) return;
@@ -25,6 +29,7 @@ export function ScreenPage() {
   }, [eventId]);
 
   const phase = state?.phase || "lobby";
+  const waiting = phase === "lobby" || phase === "between" || phase === "done";
   const showFly = phase === "lobby" || phase === "matching" || phase === "searching" || phase === "between";
   const showPairs = phase === "networking";
 
@@ -35,7 +40,7 @@ export function ScreenPage() {
       {showFly && <FlyingAvatars guests={state?.guests || []} />}
 
       <header className="relative z-10 flex items-start justify-between gap-6">
-        <div>
+        <div className="min-w-0 flex-1">
           <img src="/brand/logo.png" alt="Schmidt" className="brand-mark mb-4 h-14 md:h-16" />
           <h1 className="display max-w-3xl text-4xl font-semibold leading-tight text-mist md:text-6xl">
             {PHASE_TITLE[phase] || phase}
@@ -54,6 +59,17 @@ export function ScreenPage() {
       </header>
 
       <main className="relative z-10 mt-10">
+        {waiting && joinUrl && (
+          <div className="mb-12 flex flex-col items-center gap-5 text-center animate-reveal">
+            <HallQr joinUrl={joinUrl} />
+            <p className="max-w-2xl text-xl text-mute md:text-2xl">
+              {phase === "lobby"
+                ? "Транслируйте этот экран гостям. Нажмите QR — он станет крупным для скана с зала."
+                : "QR снова здесь: опоздавшие могут войти в паузу."}
+            </p>
+          </div>
+        )}
+
         {state?.timer?.kind && (phase === "searching" || phase === "networking" || phase === "matching") && (
           <div className="mb-10 flex justify-center">
             <div className="rounded-3xl border border-[var(--line)] bg-panel/60 px-10 py-6 backdrop-blur">
@@ -63,12 +79,6 @@ export function ScreenPage() {
         )}
 
         {showPairs && state?.pairs && <PairBoard pairs={state.pairs} />}
-
-        {phase === "lobby" && (
-          <p className="relative z-10 mt-16 max-w-xl text-xl text-mute">
-            Аватары появятся здесь, как только гости зайдут по QR с телефона.
-          </p>
-        )}
       </main>
 
       <footer className="absolute bottom-6 left-8 z-10 opacity-60">
