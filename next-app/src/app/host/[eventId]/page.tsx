@@ -27,10 +27,8 @@ export default function HostPage() {
   }, [hostToken, setError]);
 
   useEffect(() => {
-    fetch("/api/link-base")
-      .then((r) => readJson<{ linkBase: string }>(r))
-      .then((d) => setBase(d.linkBase))
-      .catch(() => setBase(window.location.origin));
+    // Same-origin only — never invent an external host (avoids wrong CDN/Vercel URLs).
+    setBase(window.location.origin);
   }, []);
 
   useEffect(() => {
@@ -47,10 +45,20 @@ export default function HostPage() {
     return k ? `${base}/join/${eventId}?k=${encodeURIComponent(String(k))}` : "";
   }, [base, eventId, state?.guestAccessToken]);
 
-  const screenUrl = useMemo(() => {
-    const s = String(state?.screenToken || (typeof window !== "undefined" ? sessionStorage.getItem(`screenToken:${eventId}`) : "") || "");
-    return s ? `${base}/screen/${eventId}#s=${encodeURIComponent(s)}` : `${base}/screen/${eventId}`;
-  }, [base, eventId, state?.screenToken]);
+  const screenToken = String(
+    state?.screenToken ||
+      (typeof window !== "undefined" ? sessionStorage.getItem(`screenToken:${eventId}`) : "") ||
+      "",
+  );
+
+  /** Relative path + hash; plain <a> keeps the hash (Next <Link> drops it). */
+  const screenHref = screenToken
+    ? `/screen/${eventId}#s=${encodeURIComponent(screenToken)}`
+    : `/screen/${eventId}`;
+
+  function openHallScreen() {
+    if (screenToken) sessionStorage.setItem(`screenToken:${eventId}`, screenToken);
+  }
 
   async function act(action: string, settings?: object) {
     const res = await fetch("/api/host", {
@@ -75,9 +83,15 @@ export default function HostPage() {
           <p style={{ color: "var(--mute)" }}>событие {eventId}</p>
         </div>
         <div className="flex gap-2">
-          <Link className="btn-ghost" href={screenUrl} target="_blank">
+          <a
+            className="btn-ghost"
+            href={screenHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={openHallScreen}
+          >
             Экран зала
-          </Link>
+          </a>
           <Link className="btn-ghost" href="/">
             На главную
           </Link>

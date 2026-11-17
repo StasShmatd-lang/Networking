@@ -6,7 +6,6 @@ import { FlyingAvatars } from "@/components/FlyingAvatars";
 import { HallQr } from "@/components/HallQr";
 import { PairBoard } from "@/components/PairBoard";
 import { TimerDisplay } from "@/components/TimerDisplay";
-import { readJson } from "@/lib/apiClient";
 import { usePollState } from "@/hooks/usePollState";
 
 const PHASE_TITLE: Record<string, string> = {
@@ -41,10 +40,7 @@ export default function ScreenInner() {
   }, [eventId, search]);
 
   useEffect(() => {
-    fetch("/api/link-base")
-      .then((r) => readJson<{ linkBase: string }>(r))
-      .then((d) => setBase(d.linkBase))
-      .catch(() => setBase(window.location.origin));
+    setBase(window.location.origin);
   }, []);
 
   const pollAuth = screenToken ? { eventId, role: "screen" as const, token: screenToken } : null;
