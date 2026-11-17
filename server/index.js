@@ -12,7 +12,9 @@ import { nanoid } from "nanoid";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
 const UPLOADS = path.join(ROOT, "uploads");
-const CLIENT_DIST = path.join(ROOT, "client", "dist");
+const CLIENT_DIST = fs.existsSync(path.join(ROOT, "public", "index.html"))
+  ? path.join(ROOT, "public")
+  : path.join(ROOT, "client", "dist");
 
 fs.mkdirSync(UPLOADS, { recursive: true });
 
