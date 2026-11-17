@@ -49,27 +49,20 @@ export function ScreenPage() {
             <p className="mt-4 max-w-3xl text-2xl text-gold-bright md:text-3xl">{state.question}</p>
           )}
         </div>
-        <div className="rounded-2xl border border-[var(--line)] bg-panel/70 px-5 py-4 text-right backdrop-blur">
-          <div className="text-sm uppercase tracking-[0.2em] text-mute">Гостей</div>
-          <div className="display text-5xl text-mist">{state?.guestCount ?? 0}</div>
-          <div className="mt-1 text-sm text-mute">
-            {connected ? "live" : "…"} · р.{state?.round ?? 0}/{state?.totalRounds ?? "—"}
+
+        <div className="flex shrink-0 items-start gap-4">
+          {waiting && joinUrl && <HallQr joinUrl={joinUrl} />}
+          <div className="rounded-2xl border border-[var(--line)] bg-panel/70 px-5 py-4 text-right backdrop-blur">
+            <div className="text-sm uppercase tracking-[0.2em] text-mute">Гостей</div>
+            <div className="display text-5xl text-mist">{state?.guestCount ?? 0}</div>
+            <div className="mt-1 text-sm text-mute">
+              {connected ? "live" : "…"} · р.{state?.round ?? 0}/{state?.totalRounds ?? "—"}
+            </div>
           </div>
         </div>
       </header>
 
       <main className="relative z-10 mt-10">
-        {waiting && joinUrl && (
-          <div className="mb-12 flex flex-col items-center gap-5 text-center animate-reveal">
-            <HallQr joinUrl={joinUrl} />
-            <p className="max-w-2xl text-xl text-mute md:text-2xl">
-              {phase === "lobby"
-                ? "Транслируйте этот экран гостям. Нажмите QR — он станет крупным для скана с зала."
-                : "QR снова здесь: опоздавшие могут войти в паузу."}
-            </p>
-          </div>
-        )}
-
         {state?.timer?.kind && (phase === "searching" || phase === "networking" || phase === "matching") && (
           <div className="mb-10 flex justify-center">
             <div className="rounded-3xl border border-[var(--line)] bg-panel/60 px-10 py-6 backdrop-blur">
