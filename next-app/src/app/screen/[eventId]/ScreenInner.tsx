@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { FlyingAvatars } from "@/components/FlyingAvatars";
+import { FullscreenButton } from "@/components/FullscreenButton";
 import { HallQr } from "@/components/HallQr";
 import { PairBoard } from "@/components/PairBoard";
 import { TimerDisplay } from "@/components/TimerDisplay";
@@ -141,6 +142,7 @@ export default function ScreenInner() {
           instagram.com/st.shmidt
         </span>
       </footer>
+      <FullscreenButton />
     </div>
   );
 }
