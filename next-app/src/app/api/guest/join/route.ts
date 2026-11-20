@@ -20,11 +20,19 @@ export async function POST(req: Request) {
     const eventId = String(body.eventId || "").trim();
     if (!eventId) return err("Нет события", 400);
 
-    const secret = body.guestToken || body.accessKey || "";
-    const key = secret
-      ? requestLimitKey(req, `join:${eventId}`, secret)
-      : `join:${eventId}:ip:${clientIp(req)}`;
+    // The whole hall scans one QR at the same moment, so the shared QR key must NOT be
+    // the bucket (that let only 30 people in per minute). Limit per guest / per phone instead,
+    // plus a generous cap for the whole event.
+    const deviceKey = String(body.clientKey || "").trim().slice(0, 64);
+    const key = body.guestToken
+      ? requestLimitKey(req, `join:${eventId}`, body.guestToken)
+      : deviceKey
+        ? `join:${eventId}:dev:${deviceKey}`
+        : `join:${eventId}:ip:${clientIp(req)}`;
     if (!rateLimit(key, 30, 60_000)) return err("Слишком много попыток", 429);
+    if (!body.guestToken && !rateLimit(`join:${eventId}:all`, 900, 60_000)) {
+      return err("Сейчас входит слишком много людей — попробуйте через несколько секунд", 429);
+    }
 
     const result = await guestJoin(eventId, body);
     return json({ ok: true, ...result });
