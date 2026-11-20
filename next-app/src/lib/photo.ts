@@ -1,5 +1,6 @@
-const MAX_SIDE = 360;
-const TARGET_CHARS = 90_000;
+// Avatars are shown at 48–112 px; 320 px is sharp on retina and stays ~20–40 KB.
+const MAX_SIDE = 320;
+const TARGET_CHARS = 50_000;
 const HARD_LIMIT_CHARS = 140_000;
 
 /** Compress a guest photo to a small JPEG data-URL for faster poll payloads. */
@@ -17,7 +18,7 @@ export async function fileToDataUrl(file: File): Promise<string> {
   ctx.drawImage(bitmap, 0, 0, w, h);
   bitmap.close();
 
-  let quality = 0.72;
+  let quality = 0.7;
   let out = canvas.toDataURL("image/jpeg", quality);
   while (out.length > TARGET_CHARS && quality > 0.38) {
     quality -= 0.08;

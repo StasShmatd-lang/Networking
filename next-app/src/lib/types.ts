@@ -7,7 +7,10 @@ export type Guest = {
   clientKey?: string;
   name: string;
   company: string;
-  photoUrl: string | null;
+  /** Photo stored in the `photos` table, served at /api/photo/:id. */
+  photoId?: string | null;
+  /** Legacy inline data-URL from older events (kept readable, never written). */
+  photoUrl?: string | null;
   ready: boolean;
 };
 

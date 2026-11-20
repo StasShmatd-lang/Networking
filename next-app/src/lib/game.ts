@@ -1,19 +1,38 @@
 import { nanoid } from "nanoid";
-import { sql } from "./db";
+import { sql, withTx, type Query } from "./db";
 import { DEFAULT_QUESTIONS, type ChatMessage, type EventData, type Guest, type Group } from "./types";
 
 const EVENT_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_EVENTS = 80;
 
+/** Public URL of a guest photo (small path, browser caches it). */
+function photoSrc(g: Guest): string | null {
+  if (g.photoId) return `/api/photo/${g.photoId}`;
+  return g.photoUrl || null;
+}
+
 function guestPublic(g: Guest, withPhoto = true) {
+  const src = photoSrc(g);
   return {
     id: g.id,
     name: g.name,
     company: g.company,
-    photoUrl: withPhoto ? g.photoUrl : null,
-    hasPhoto: Boolean(g.photoUrl),
+    photoUrl: withPhoto ? src : null,
+    hasPhoto: Boolean(src),
     ready: g.ready,
   };
+}
+
+/** "  Анна  Иванова " / "ООО «Ромашка»" → stable comparison key. */
+function personKey(name: string, company: string) {
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/ё/g, "е")
+      .replace(/[«»"'`.,()]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  return `${norm(name)}|${norm(company)}`;
 }
 
 function shuffle<T>(arr: T[]) {
@@ -65,6 +84,8 @@ function buildPairs(ev: EventData) {
 }
 
 const MAX_EVENT_JSON_BYTES = 6_000_000;
+/** One avatar after client compression is ~20–40 KB; this is a hard safety cap. */
+const MAX_PHOTO_BYTES = 150_000;
 
 /** Returns true when phase/timer actually changed. */
 function advanceTimers(ev: EventData): boolean {
@@ -106,14 +127,61 @@ export async function loadEventTicked(id: string): Promise<{ ev: EventData; dirt
   return { ev, dirty: advanceTimers(ev) };
 }
 
-export async function saveEvent(ev: EventData) {
+export async function saveEvent(ev: EventData, q: Query = sql) {
   const raw = JSON.stringify(ev);
   if (raw.length > MAX_EVENT_JSON_BYTES) throw new Error("Событие слишком большое");
-  await sql(
+  await q(
     `insert into events (id, data, updated_at) values ($1, $2::jsonb, now())
      on conflict (id) do update set data = excluded.data, updated_at = now()`,
     [ev.id, raw],
   );
+}
+
+/**
+ * Load → change → save under a row lock.
+ * Two guests joining (or tapping «нашёл») at the same moment now wait
+ * for each other instead of the later save wiping the earlier one.
+ */
+export async function mutateEvent<T>(
+  id: string,
+  change: (ev: EventData, q: Query) => Promise<T> | T,
+): Promise<T> {
+  return withTx(async (q) => {
+    const rows = await q<{ data: EventData | string }>("select data from events where id = $1 for update", [id]);
+    if (!rows[0]) throw new Error("Событие не найдено");
+    const data = rows[0].data;
+    const ev = (typeof data === "string" ? JSON.parse(data) : data) as EventData;
+    advanceTimers(ev);
+    const result = await change(ev, q);
+    await saveEvent(ev, q);
+    return result;
+  });
+}
+
+function decodePhoto(dataUrl: string): Buffer | null {
+  const m = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+  if (!m) return null;
+  const bytes = Buffer.from(m[2], "base64");
+  if (!bytes.length || bytes.length > MAX_PHOTO_BYTES) return null;
+  return bytes;
+}
+
+/** Store a photo in its own row; returns the new id (old one is deleted). */
+async function storePhoto(q: Query, ev: EventData, guest: Guest, dataUrl: string) {
+  const bytes = decodePhoto(dataUrl);
+  if (!bytes) return false;
+  const id = nanoid(16);
+  await q("insert into photos (id, event_id, data) values ($1, $2, $3)", [id, ev.id, bytes]);
+  if (guest.photoId) await q("delete from photos where id = $1", [guest.photoId]);
+  guest.photoId = id;
+  guest.photoUrl = null;
+  return true;
+}
+
+export async function loadPhoto(id: string): Promise<Uint8Array | null> {
+  if (!/^[A-Za-z0-9_-]{16}$/.test(id)) return null;
+  const rows = await sql<{ data: Uint8Array }>("select data from photos where id = $1", [id]);
+  return rows[0]?.data ?? null;
 }
 
 export async function createEvent() {
@@ -143,6 +211,7 @@ export async function createEvent() {
 export async function pruneOld() {
   const cutoff = Date.now() - EVENT_TTL_MS;
   await sql("delete from events where (data->>'createdAt')::bigint < $1", [cutoff]);
+  await sql("delete from photos where event_id not in (select id from events)");
 }
 
 function findGroup(ev: EventData, guestId: string) {
@@ -167,8 +236,8 @@ export function publicState(ev: EventData, role: "host" | "guest" | "screen", gu
         id: g!.id,
         name: g!.name,
         company: g!.company,
-        photoUrl: screenPhotos ? g!.photoUrl : null,
-        hasPhoto: Boolean(g!.photoUrl),
+        photoUrl: screenPhotos ? photoSrc(g!) : null,
+        hasPhoto: Boolean(photoSrc(g!)),
       }));
     return {
       id: p.id,
@@ -257,9 +326,18 @@ export async function hostAction(
   action: string,
   settings?: Partial<{ totalRounds: number; searchSec: number; networkSec: number; questions: string[] }>,
 ) {
-  const loaded = await loadEventTicked(eventId);
-  if (!loaded || loaded.ev.hostToken !== hostToken) throw new Error("Нет доступа");
-  const ev = loaded.ev;
+  return mutateEvent(eventId, (ev) => {
+    if (ev.hostToken !== hostToken) throw new Error("Нет доступа");
+    applyHostAction(ev, action, settings);
+    return publicState(ev, "host");
+  });
+}
+
+function applyHostAction(
+  ev: EventData,
+  action: string,
+  settings?: Partial<{ totalRounds: number; searchSec: number; networkSec: number; questions: string[] }>,
+) {
   if (action === "settings" && settings) {
     if (settings.totalRounds != null) ev.totalRounds = Math.min(20, Math.max(1, Number(settings.totalRounds) || 5));
     if (settings.searchSec != null) ev.searchSec = Math.min(600, Math.max(15, Number(settings.searchSec) || 90));
@@ -300,8 +378,6 @@ export async function hostAction(
     ev.chat = {};
     ev.timer = { kind: null, endsAt: null, totalSec: 0 };
   } else throw new Error("Неизвестное действие");
-  await saveEvent(ev);
-  return publicState(ev, "host");
 }
 
 const joinLocks = new Map<string, Promise<void>>();
@@ -352,106 +428,132 @@ async function guestJoinUnlocked(
     photoUrl?: string | null;
   },
 ) {
-  const loaded = await loadEventTicked(eventId);
-  if (!loaded) throw new Error("Событие не найдено");
-  const ev = loaded.ev;
   const clientKey = normalizeClientKey(input.clientKey);
+  return mutateEvent(eventId, async (ev, q) => {
+    let guest = input.guestId ? ev.guests.find((g) => g.id === input.guestId) : undefined;
 
-  let guest = input.guestId ? ev.guests.find((g) => g.id === input.guestId) : undefined;
-
-  // Token mismatch → treat as unknown (do not create a second profile blindly).
-  if (guest && input.guestToken && input.guestToken !== guest.token) {
-    guest = undefined;
-  }
-
-  // Stable device/session key wins over a missing/stale guestId (rejoin + double-tap).
-  if (!guest && clientKey) {
-    guest = ev.guests.find((g) => g.clientKey === clientKey);
-  }
-
-  if (guest) {
-    const tokenOk = Boolean(input.guestToken && input.guestToken === guest.token);
-    const keyOk = Boolean(clientKey && guest.clientKey && guest.clientKey === clientKey);
-    const accessOk = Boolean(input.accessKey && input.accessKey === ev.guestAccessToken);
-    if (!tokenOk && !keyOk && !accessOk) throw new Error("Нет доступа к профилю");
-    if (clientKey) guest.clientKey = clientKey;
-    if (input.name) guest.name = String(input.name).trim().slice(0, 60);
-    if (input.company) guest.company = String(input.company).trim().slice(0, 80);
-    if (input.photoUrl === null) {
-      /* keep existing */
-    } else if (input.photoUrl !== undefined) {
-      const photo = safeDataPhoto(input.photoUrl);
-      if (photo) guest.photoUrl = photo;
-      else if (input.photoUrl === "") guest.photoUrl = null;
+    // Token mismatch → treat as unknown (do not create a second profile blindly).
+    if (guest && input.guestToken && input.guestToken !== guest.token) {
+      guest = undefined;
     }
-    guest.ready = true;
-  } else {
-    if (!input.accessKey || input.accessKey !== ev.guestAccessToken) throw new Error("Откройте ссылку из QR");
-    if (ev.phase !== "lobby" && ev.phase !== "between") throw new Error("Регистрация закрыта");
-    if (ev.guests.length >= 650) throw new Error("Зал заполнен");
+
+    // Stable device/session key wins over a missing/stale guestId (rejoin + double-tap).
+    if (!guest && clientKey) {
+      guest = ev.guests.find((g) => g.clientKey === clientKey);
+    }
+
+    const accessOk = Boolean(input.accessKey && input.accessKey === ev.guestAccessToken);
     const name = String(input.name || "").trim().slice(0, 60);
     const company = String(input.company || "").trim().slice(0, 80);
-    if (!name || !company) throw new Error("Нужны имя и компания");
-    guest = {
-      id: nanoid(10),
-      token: nanoid(18),
-      clientKey: clientKey || undefined,
-      name,
-      company,
-      photoUrl: safeDataPhoto(input.photoUrl),
-      ready: true,
+
+    // Same person from another browser (Telegram/Instagram in-app browser → Safari),
+    // incognito or a cleared phone: same name + company in this event = same profile.
+    if (!guest && accessOk && name && company) {
+      const key = personKey(name, company);
+      guest = ev.guests.find((g) => personKey(g.name, g.company) === key);
+      if (guest && clientKey) guest.clientKey = clientKey;
+    }
+
+    if (guest) {
+      const tokenOk = Boolean(input.guestToken && input.guestToken === guest.token);
+      const keyOk = Boolean(clientKey && guest.clientKey && guest.clientKey === clientKey);
+      if (!tokenOk && !keyOk && !accessOk) throw new Error("Нет доступа к профилю");
+      if (clientKey) guest.clientKey = clientKey;
+      if (name) guest.name = name;
+      if (company) guest.company = company;
+      if (typeof input.photoUrl === "string") {
+        const photo = safeDataPhoto(input.photoUrl);
+        if (photo) {
+          await storePhoto(q, ev, guest, photo);
+        } else if (input.photoUrl === "") {
+          if (guest.photoId) await q("delete from photos where id = $1", [guest.photoId]);
+          guest.photoId = null;
+          guest.photoUrl = null;
+        }
+      }
+      guest.ready = true;
+    } else {
+      if (!accessOk) throw new Error("Откройте ссылку из QR");
+      if (ev.phase !== "lobby" && ev.phase !== "between") throw new Error("Регистрация закрыта");
+      if (ev.guests.length >= 650) throw new Error("Зал заполнен");
+      if (!name || !company) throw new Error("Нужны имя и компания");
+      guest = {
+        id: nanoid(10),
+        token: nanoid(18),
+        clientKey: clientKey || undefined,
+        name,
+        company,
+        photoId: null,
+        ready: true,
+      };
+      ev.guests.push(guest);
+      const photo = safeDataPhoto(input.photoUrl);
+      if (photo) await storePhoto(q, ev, guest, photo);
+    }
+    return {
+      guestId: guest.id,
+      guestToken: guest.token,
+      state: publicState(ev, "guest", guest.id),
     };
-    ev.guests.push(guest);
-  }
-  await saveEvent(ev);
-  return {
-    guestId: guest.id,
-    guestToken: guest.token,
-    state: publicState(ev, "guest", guest.id),
-  };
+  });
 }
 
 export async function guestFound(eventId: string, guestId: string, guestToken: string) {
-  const loaded = await loadEventTicked(eventId);
-  if (!loaded) throw new Error("Событие не найдено");
-  const ev = loaded.ev;
-  const guest = ev.guests.find((g) => g.id === guestId);
-  if (!guest || guest.token !== guestToken) throw new Error("Нет сессии");
-  if (ev.phase !== "searching") throw new Error("Не фаза поиска");
-  const pair = findGroup(ev, guestId);
-  if (!pair || pair.bye) throw new Error("Нет группы");
-  pair.found = true;
-  if (ev.pairs.every((p) => p.found || p.bye)) {
-    ev.phase = "networking";
-    ev.timer = { kind: "network", endsAt: Date.now() + ev.networkSec * 1000, totalSec: ev.networkSec };
-  }
-  await saveEvent(ev);
-  return publicState(ev, "guest", guestId);
+  return mutateEvent(eventId, (ev) => {
+    const guest = ev.guests.find((g) => g.id === guestId);
+    if (!guest || guest.token !== guestToken) throw new Error("Нет сессии");
+    if (ev.phase !== "searching") throw new Error("Не фаза поиска");
+    const pair = findGroup(ev, guestId);
+    if (!pair || pair.bye) throw new Error("Нет группы");
+    pair.found = true;
+    if (ev.pairs.every((p) => p.found || p.bye)) {
+      ev.phase = "networking";
+      ev.timer = { kind: "network", endsAt: Date.now() + ev.networkSec * 1000, totalSec: ev.networkSec };
+    }
+    return publicState(ev, "guest", guestId);
+  });
 }
 
 export async function guestChat(eventId: string, guestId: string, guestToken: string, text: string) {
-  const loaded = await loadEventTicked(eventId);
-  if (!loaded) throw new Error("Событие не найдено");
-  const ev = loaded.ev;
-  const guest = ev.guests.find((g) => g.id === guestId);
-  if (!guest || guest.token !== guestToken) throw new Error("Нет сессии");
-  if (ev.phase !== "searching" && ev.phase !== "networking") throw new Error("Чат недоступен");
-  const pair = findGroup(ev, guestId);
-  if (!pair || pair.bye) throw new Error("Нет группы");
-  const msg: ChatMessage = {
-    id: nanoid(6),
-    from: guestId,
-    fromName: guest.name,
-    text: String(text || "").trim().slice(0, 280),
-    at: Date.now(),
-  };
-  if (!msg.text) throw new Error("Пусто");
-  const list = ev.chat[pair.id] || [];
-  list.push(msg);
-  if (list.length > 80) list.splice(0, list.length - 80);
-  ev.chat[pair.id] = list;
-  await saveEvent(ev);
-  return { message: msg, state: publicState(ev, "guest", guestId) };
+  return mutateEvent(eventId, (ev) => {
+    const guest = ev.guests.find((g) => g.id === guestId);
+    if (!guest || guest.token !== guestToken) throw new Error("Нет сессии");
+    if (ev.phase !== "searching" && ev.phase !== "networking") throw new Error("Чат недоступен");
+    const pair = findGroup(ev, guestId);
+    if (!pair || pair.bye) throw new Error("Нет группы");
+    const msg: ChatMessage = {
+      id: nanoid(6),
+      from: guestId,
+      fromName: guest.name,
+      text: String(text || "").trim().slice(0, 280),
+      at: Date.now(),
+    };
+    if (!msg.text) throw new Error("Пусто");
+    const list = ev.chat[pair.id] || [];
+    list.push(msg);
+    if (list.length > 80) list.splice(0, list.length - 80);
+    ev.chat[pair.id] = list;
+    return { message: msg, state: publicState(ev, "guest", guestId) };
+  });
+}
+
+function stateFor(
+  ev: EventData,
+  role: "host" | "guest" | "screen",
+  tokens: { hostToken?: string; screenToken?: string; guestId?: string; guestToken?: string },
+) {
+  if (role === "host") {
+    if (!tokens.hostToken || tokens.hostToken !== ev.hostToken) throw new Error("Нет доступа");
+    return publicState(ev, "host");
+  }
+  if (role === "screen") {
+    if (!tokens.screenToken || tokens.screenToken !== ev.screenToken) throw new Error("Нет доступа");
+    return publicState(ev, "screen");
+  }
+  if (!tokens.guestId || !tokens.guestToken) throw new Error("Нет сессии");
+  const guest = ev.guests.find((g) => g.id === tokens.guestId);
+  if (!guest || guest.token !== tokens.guestToken) throw new Error("Нет доступа");
+  return publicState(ev, "guest", guest.id);
 }
 
 export async function getState(
@@ -459,22 +561,9 @@ export async function getState(
   role: "host" | "guest" | "screen",
   tokens: { hostToken?: string; screenToken?: string; guestId?: string; guestToken?: string },
 ) {
+  // Polls are read-only and lock-free; only a due timer switch takes the lock.
   const loaded = await loadEventTicked(eventId);
   if (!loaded) throw new Error("Событие не найдено");
-  const { ev, dirty } = loaded;
-  if (role === "host") {
-    if (!tokens.hostToken || tokens.hostToken !== ev.hostToken) throw new Error("Нет доступа");
-    if (dirty) await saveEvent(ev);
-    return publicState(ev, "host");
-  }
-  if (role === "screen") {
-    if (!tokens.screenToken || tokens.screenToken !== ev.screenToken) throw new Error("Нет доступа");
-    if (dirty) await saveEvent(ev);
-    return publicState(ev, "screen");
-  }
-  if (!tokens.guestId || !tokens.guestToken) throw new Error("Нет сессии");
-  const guest = ev.guests.find((g) => g.id === tokens.guestId);
-  if (!guest || guest.token !== tokens.guestToken) throw new Error("Нет доступа");
-  if (dirty) await saveEvent(ev);
-  return publicState(ev, "guest", guest.id);
+  if (!loaded.dirty) return stateFor(loaded.ev, role, tokens);
+  return mutateEvent(eventId, (ev) => stateFor(ev, role, tokens));
 }
