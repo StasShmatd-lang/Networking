@@ -5,8 +5,15 @@ import { DEFAULT_QUESTIONS, type ChatMessage, type EventData, type Guest, type G
 const EVENT_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_EVENTS = 80;
 
-function guestPublic(g: Guest) {
-  return { id: g.id, name: g.name, company: g.company, photoUrl: g.photoUrl, ready: g.ready };
+function guestPublic(g: Guest, withPhoto = true) {
+  return {
+    id: g.id,
+    name: g.name,
+    company: g.company,
+    photoUrl: withPhoto ? g.photoUrl : null,
+    hasPhoto: Boolean(g.photoUrl),
+    ready: g.ready,
+  };
 }
 
 function shuffle<T>(arr: T[]) {
@@ -143,8 +150,15 @@ function findGroup(ev: EventData, guestId: string) {
 }
 
 export function publicState(ev: EventData, role: "host" | "guest" | "screen", guestId?: string) {
-  const includePhotos = role !== "screen" || ev.phase !== "networking";
-  const guests = ev.guests.map(guestPublic);
+  // Screen needs faces for flying avatars (except networking board); host/guest polls strip bulk photos.
+  const screenPhotos = role === "screen" && ev.phase !== "networking";
+  const guests =
+    role === "guest"
+      ? []
+      : role === "host"
+        ? ev.guests.map((g) => guestPublic(g, false))
+        : ev.guests.map((g) => guestPublic(g, screenPhotos));
+
   const pairs = ev.pairs.map((p) => {
     const members = p.members
       .map((id) => ev.guests.find((g) => g.id === id))
@@ -153,7 +167,8 @@ export function publicState(ev: EventData, role: "host" | "guest" | "screen", gu
         id: g!.id,
         name: g!.name,
         company: g!.company,
-        photoUrl: includePhotos ? g!.photoUrl : null,
+        photoUrl: screenPhotos ? g!.photoUrl : null,
+        hasPhoto: Boolean(g!.photoUrl),
       }));
     return {
       id: p.id,
@@ -175,16 +190,16 @@ export function publicState(ev: EventData, role: "host" | "guest" | "screen", gu
     totalRounds: ev.totalRounds,
     searchSec: ev.searchSec,
     networkSec: ev.networkSec,
-    questions: ev.questions,
     question: ev.round > 0 ? questionForRound(ev) : null,
     guestCount: ev.guests.length,
     guests,
-    pairs,
+    pairs: role === "guest" ? [] : pairs,
     timer: serializeTimer(ev),
     role,
   };
 
   if (role === "host") {
+    base.questions = ev.questions;
     base.guestAccessToken = ev.guestAccessToken;
     base.screenToken = ev.screenToken;
   }
@@ -198,9 +213,9 @@ export function publicState(ev: EventData, role: "host" | "guest" | "screen", gu
           .filter((id) => id !== guestId)
           .map((id) => ev.guests.find((g) => g.id === id))
           .filter(Boolean)
-          .map((g) => guestPublic(g!))
+          .map((g) => guestPublic(g!, true))
       : [];
-    base.me = me ? guestPublic(me) : null;
+    base.me = me ? guestPublic(me, true) : null;
     base.pair = pair
       ? {
           id: pair.id,
@@ -224,8 +239,16 @@ function safeDataPhoto(url: unknown) {
   if (!url.startsWith("data:image/jpeg") && !url.startsWith("data:image/png") && !url.startsWith("data:image/webp")) {
     return null;
   }
-  if (url.length > 350_000) return null;
+  if (url.length > 160_000) return null;
   return url;
+}
+
+function normalizeClientKey(raw: unknown) {
+  const key = String(raw || "")
+    .trim()
+    .slice(0, 64);
+  if (!/^[a-zA-Z0-9_-]{8,64}$/.test(key)) return "";
+  return key;
 }
 
 export async function hostAction(
@@ -281,12 +304,49 @@ export async function hostAction(
   return publicState(ev, "host");
 }
 
+const joinLocks = new Map<string, Promise<void>>();
+
+async function withJoinLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = joinLocks.get(key) || Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const chain = prev.then(() => gate);
+  joinLocks.set(key, chain);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (joinLocks.get(key) === chain) joinLocks.delete(key);
+  }
+}
+
 export async function guestJoin(
   eventId: string,
   input: {
     accessKey?: string;
     guestId?: string;
     guestToken?: string;
+    clientKey?: string;
+    name?: string;
+    company?: string;
+    photoUrl?: string | null;
+  },
+) {
+  const clientKey = normalizeClientKey(input.clientKey);
+  const lockKey = `${eventId}:${clientKey || input.guestId || "anon"}`;
+  return withJoinLock(lockKey, () => guestJoinUnlocked(eventId, { ...input, clientKey }));
+}
+
+async function guestJoinUnlocked(
+  eventId: string,
+  input: {
+    accessKey?: string;
+    guestId?: string;
+    guestToken?: string;
+    clientKey?: string;
     name?: string;
     company?: string;
     photoUrl?: string | null;
@@ -295,13 +355,35 @@ export async function guestJoin(
   const loaded = await loadEventTicked(eventId);
   if (!loaded) throw new Error("Событие не найдено");
   const ev = loaded.ev;
+  const clientKey = normalizeClientKey(input.clientKey);
+
   let guest = input.guestId ? ev.guests.find((g) => g.id === input.guestId) : undefined;
+
+  // Token mismatch → treat as unknown (do not create a second profile blindly).
+  if (guest && input.guestToken && input.guestToken !== guest.token) {
+    guest = undefined;
+  }
+
+  // Stable device/session key wins over a missing/stale guestId (rejoin + double-tap).
+  if (!guest && clientKey) {
+    guest = ev.guests.find((g) => g.clientKey === clientKey);
+  }
+
   if (guest) {
-    if (!input.guestToken || input.guestToken !== guest.token) throw new Error("Нет доступа к профилю");
+    const tokenOk = Boolean(input.guestToken && input.guestToken === guest.token);
+    const keyOk = Boolean(clientKey && guest.clientKey && guest.clientKey === clientKey);
+    const accessOk = Boolean(input.accessKey && input.accessKey === ev.guestAccessToken);
+    if (!tokenOk && !keyOk && !accessOk) throw new Error("Нет доступа к профилю");
+    if (clientKey) guest.clientKey = clientKey;
     if (input.name) guest.name = String(input.name).trim().slice(0, 60);
     if (input.company) guest.company = String(input.company).trim().slice(0, 80);
-    const photo = safeDataPhoto(input.photoUrl);
-    if (photo) guest.photoUrl = photo;
+    if (input.photoUrl === null) {
+      /* keep existing */
+    } else if (input.photoUrl !== undefined) {
+      const photo = safeDataPhoto(input.photoUrl);
+      if (photo) guest.photoUrl = photo;
+      else if (input.photoUrl === "") guest.photoUrl = null;
+    }
     guest.ready = true;
   } else {
     if (!input.accessKey || input.accessKey !== ev.guestAccessToken) throw new Error("Откройте ссылку из QR");
@@ -313,6 +395,7 @@ export async function guestJoin(
     guest = {
       id: nanoid(10),
       token: nanoid(18),
+      clientKey: clientKey || undefined,
       name,
       company,
       photoUrl: safeDataPhoto(input.photoUrl),

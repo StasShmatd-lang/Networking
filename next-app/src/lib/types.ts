@@ -3,6 +3,8 @@ export type Phase = "lobby" | "matching" | "searching" | "networking" | "between
 export type Guest = {
   id: string;
   token: string;
+  /** Stable browser/session key — prevents duplicate profiles on rejoin/double-tap. */
+  clientKey?: string;
   name: string;
   company: string;
   photoUrl: string | null;

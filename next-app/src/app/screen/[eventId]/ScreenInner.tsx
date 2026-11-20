@@ -30,7 +30,6 @@ export default function ScreenInner() {
     const s = fromHash || fromQuery || sessionStorage.getItem(`screenToken:${eventId}`) || "";
     if (s) sessionStorage.setItem(`screenToken:${eventId}`, s);
     setScreenToken(s);
-    // Drop query token from address bar so it is not stuck in history/Referer
     if (fromQuery && typeof window !== "undefined") {
       const url = new URL(window.location.href);
       url.searchParams.delete("s");
@@ -62,7 +61,8 @@ export default function ScreenInner() {
   if (!screenToken || (!state && error)) {
     return (
       <div className="shell-hall flex items-center justify-center">
-        <p className="max-w-md text-center text-xl" style={{ color: "var(--mute)" }}>
+        <div className="hall-atmosphere animate-hall-breathe" />
+        <p className="relative z-10 max-w-md text-center text-xl" style={{ color: "var(--mute)" }}>
           {error || (!screenToken ? "Откройте экран по ссылке из панели ведущего" : "Подключаем экран зала…")}
         </p>
       </div>
@@ -72,7 +72,8 @@ export default function ScreenInner() {
   if (!state) {
     return (
       <div className="shell-hall flex items-center justify-center">
-        <p className="text-xl" style={{ color: "var(--mute)" }}>
+        <div className="hall-atmosphere animate-hall-breathe" />
+        <p className="relative z-10 text-xl" style={{ color: "var(--mute)" }}>
           Подключаем экран зала…
         </p>
       </div>
@@ -81,28 +82,32 @@ export default function ScreenInner() {
 
   return (
     <div className="shell-hall">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(201,166,107,0.12),transparent_40%),radial-gradient(circle_at_80%_0%,rgba(42,157,143,0.14),transparent_35%)]" />
+      <div className="hall-atmosphere animate-hall-breathe" />
+      <div className="hall-vignette" />
       {showFly && <FlyingAvatars guests={guests} />}
-      <header className="relative z-10 flex items-start justify-between gap-6">
+      <header className="relative z-10 flex items-start justify-between gap-6 animate-rise">
         <div className="min-w-0 flex-1">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/brand/logo.png" alt="Schmidt" className="brand-mark mb-4 h-14 md:h-16" />
-          <h1 className="display max-w-3xl text-4xl font-semibold leading-tight md:text-6xl">
+          <img src="/brand/logo.png" alt="Schmidt" className="brand-mark mb-5 h-16 md:h-20" />
+          <h1 className="display max-w-4xl text-4xl font-semibold leading-[1.05] md:text-6xl lg:text-7xl">
             {PHASE_TITLE[phase] || phase}
           </h1>
           {typeof state.question === "string" && phase === "networking" && (
-            <p className="mt-4 max-w-3xl text-2xl md:text-3xl" style={{ color: "var(--gold-bright)" }}>
+            <p className="mt-5 max-w-3xl text-2xl md:text-4xl" style={{ color: "var(--gold-bright)" }}>
               {state.question}
             </p>
           )}
         </div>
         <div className="flex shrink-0 items-start gap-4">
           {waiting && joinUrl && <HallQr joinUrl={joinUrl} />}
-          <div className="rounded-2xl border px-5 py-4 text-right backdrop-blur" style={{ borderColor: "var(--line)", background: "color-mix(in srgb, var(--panel) 70%, transparent)" }}>
+          <div
+            className="rounded-2xl border px-5 py-4 text-right backdrop-blur"
+            style={{ borderColor: "var(--line)", background: "color-mix(in srgb, var(--panel) 70%, transparent)" }}
+          >
             <div className="text-sm uppercase tracking-[0.2em]" style={{ color: "var(--mute)" }}>
               Гостей
             </div>
-            <div className="display text-5xl">{String(state.guestCount ?? 0)}</div>
+            <div className="display text-5xl md:text-6xl">{String(state.guestCount ?? 0)}</div>
             <div className="mt-1 text-sm" style={{ color: "var(--mute)" }}>
               live · р.{String(state.round ?? 0)}/{String(state.totalRounds ?? "—")}
             </div>
@@ -112,16 +117,22 @@ export default function ScreenInner() {
       <main className="relative z-10 mt-10">
         {timer?.kind && (phase === "searching" || phase === "networking" || phase === "matching") && (
           <div className="mb-10 flex justify-center">
-            <div className="rounded-3xl border px-10 py-6 backdrop-blur" style={{ borderColor: "var(--line)", background: "color-mix(in srgb, var(--panel) 60%, transparent)" }}>
+            <div
+              className="rounded-3xl border px-10 py-6 backdrop-blur"
+              style={{ borderColor: "var(--line)", background: "color-mix(in srgb, var(--panel) 60%, transparent)" }}
+            >
               <TimerDisplay timer={timer} large />
             </div>
           </div>
         )}
         {showPairs && <PairBoard pairs={pairs} />}
       </main>
-      <footer className="absolute bottom-6 left-8 z-10 opacity-60">
+      <footer className="absolute bottom-6 left-8 z-10 flex items-center gap-3 opacity-50">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/brand/logo.png" alt="" className="h-7 w-auto" />
+        <span className="text-xs tracking-[0.12em]" style={{ color: "var(--mute)" }}>
+          instagram.com/st.shmidt
+        </span>
       </footer>
     </div>
   );

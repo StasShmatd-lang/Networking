@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, RefObject, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { Avatar } from "@/components/Avatar";
 import { BrandFooter } from "@/components/BrandFooter";
@@ -10,7 +10,7 @@ import { fileToDataUrl } from "@/lib/photo";
 import { usePollState } from "@/hooks/usePollState";
 
 type ChatMsg = { id: string; from: string; fromName?: string; text: string; at: number };
-type Guest = { id: string; name: string; company: string; photoUrl?: string | null };
+type Guest = { id: string; name: string; company: string; photoUrl?: string | null; hasPhoto?: boolean };
 type Pair = {
   id: string;
   size: number;
@@ -22,6 +22,20 @@ type Pair = {
   amAsker: boolean;
 };
 
+function ensureClientKey(eventId: string) {
+  const key = `guestClient:${eventId}`;
+  let v = localStorage.getItem(key);
+  if (!v || !/^[a-zA-Z0-9_-]{8,64}$/.test(v)) {
+    const bytes = new Uint8Array(18);
+    crypto.getRandomValues(bytes);
+    v = Array.from(bytes, (b) => b.toString(36).padStart(2, "0"))
+      .join("")
+      .slice(0, 24);
+    localStorage.setItem(key, v);
+  }
+  return v;
+}
+
 export default function JoinInner() {
   const { eventId = "" } = useParams<{ eventId: string }>();
   const search = useSearchParams();
@@ -29,17 +43,24 @@ export default function JoinInner() {
   const accessKeyStorage = `guestAccess:${eventId}`;
   const storageKey = `guest:${eventId}`;
   const tokenKey = `guestToken:${eventId}`;
+  const clientKeyRef = useRef("");
+  const joinLock = useRef(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const profileFileRef = useRef<HTMLInputElement>(null);
 
   const [accessKey, setAccessKey] = useState("");
   const [guestId, setGuestId] = useState("");
   const [guestToken, setGuestToken] = useState("");
+  const [clientKey, setClientKey] = useState("");
   const [joined, setJoined] = useState(false);
   const [name, setName] = useState("");
   const [company, setCompany] = useState("");
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [chatText, setChatText] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
+  const [photoFlash, setPhotoFlash] = useState(false);
   const chatEnd = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -48,7 +69,10 @@ export default function JoinInner() {
     setAccessKey(k);
     setGuestId(localStorage.getItem(storageKey) || "");
     setGuestToken(localStorage.getItem(tokenKey) || "");
-  }, [accessKeyFromUrl, accessKeyStorage, storageKey, tokenKey]);
+    const ck = ensureClientKey(eventId);
+    clientKeyRef.current = ck;
+    setClientKey(ck);
+  }, [accessKeyFromUrl, accessKeyStorage, storageKey, tokenKey, eventId]);
 
   const pollAuth = useMemo(() => {
     if (!joined || !guestId || !guestToken) return null;
@@ -63,13 +87,18 @@ export default function JoinInner() {
   }, [state?.chat]);
 
   useEffect(() => {
-    if (!eventId || !guestId || !guestToken || joined) return;
+    if (!eventId || !guestId || !guestToken || joined || !clientKey) return;
     (async () => {
       try {
         const res = await fetch("/api/guest/join", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ eventId, guestId, guestToken }),
+          body: JSON.stringify({
+            eventId,
+            guestId,
+            guestToken,
+            clientKey,
+          }),
         });
         const data = await readJson<{
           ok?: boolean;
@@ -99,18 +128,53 @@ export default function JoinInner() {
         /* stay on form */
       }
     })();
-  }, [eventId, guestId, guestToken, joined, storageKey, tokenKey, setState]);
+  }, [eventId, guestId, guestToken, joined, clientKey, storageKey, tokenKey, setState]);
 
-  async function onPhoto(file: File | null) {
+  async function onPhoto(file: File | null, forProfile = false) {
     if (!file) return;
-    if (!accessKey) {
+    if (!accessKey && !guestToken) {
       setFormError("Откройте страницу по QR — без ключа фото не загрузить");
       return;
     }
     setUploading(true);
     setFormError(null);
     try {
-      setPhotoUrl(await fileToDataUrl(file));
+      const dataUrl = await fileToDataUrl(file);
+      setPhotoUrl(dataUrl);
+      setPhotoFlash(true);
+      window.setTimeout(() => setPhotoFlash(false), 700);
+      if (forProfile && guestId && guestToken) {
+        const prev = (state?.me as Guest | undefined)?.photoUrl || null;
+        if (state?.me) {
+          setState({
+            ...state,
+            me: { ...(state.me as Guest), photoUrl: dataUrl, hasPhoto: true },
+          });
+        }
+        const res = await fetch("/api/guest/join", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            eventId,
+            guestId,
+            guestToken,
+            clientKey: clientKeyRef.current || clientKey,
+            accessKey: accessKey || undefined,
+            photoUrl: dataUrl,
+          }),
+        });
+        const data = await readJson<{ ok?: boolean; state?: Record<string, unknown>; error?: string }>(res);
+        if (!res.ok || !data.ok) {
+          if (state?.me) {
+            setState({
+              ...state,
+              me: { ...(state.me as Guest), photoUrl: prev, hasPhoto: Boolean(prev) },
+            });
+          }
+          throw new Error(data.error || "Не удалось сохранить фото");
+        }
+        if (data.state) setState(data.state);
+      }
     } catch (e) {
       setFormError(e instanceof Error ? e.message : "Ошибка фото");
     } finally {
@@ -120,11 +184,15 @@ export default function JoinInner() {
 
   async function register(e: FormEvent) {
     e.preventDefault();
+    if (joinLock.current || submitting) return;
     if (!accessKey && !guestToken) {
       setFormError("Откройте ссылку из QR события");
       return;
     }
+    joinLock.current = true;
+    setSubmitting(true);
     setFormError(null);
+    const ck = clientKeyRef.current || ensureClientKey(eventId);
     try {
       const res = await fetch("/api/guest/join", {
         method: "POST",
@@ -133,6 +201,7 @@ export default function JoinInner() {
           eventId,
           guestId: guestId || undefined,
           guestToken: guestToken || undefined,
+          clientKey: ck,
           accessKey: accessKey || undefined,
           name,
           company,
@@ -159,10 +228,21 @@ export default function JoinInner() {
       setJoined(true);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Не удалось войти");
+      joinLock.current = false;
+    } finally {
+      setSubmitting(false);
     }
   }
 
   async function markFound() {
+    if (!pair || pair.found) return;
+    const prev = state;
+    if (state?.pair) {
+      setState({
+        ...state,
+        pair: { ...(state.pair as Pair), found: true },
+      });
+    }
     const res = await fetch("/api/guest/found", {
       method: "POST",
       headers: {
@@ -173,14 +253,26 @@ export default function JoinInner() {
       body: JSON.stringify({ eventId, guestId }),
     });
     const data = await readJson<{ ok?: boolean; error?: string; state?: Record<string, unknown> }>(res);
-    if (!res.ok || data.error) setError(data.error || "Не удалось");
-    else if (data.state) setState(data.state);
+    if (!res.ok || data.error) {
+      if (prev) setState(prev);
+      setError(data.error || "Не удалось");
+    } else if (data.state) setState(data.state);
   }
 
   async function sendChat(e: FormEvent) {
     e.preventDefault();
     const text = chatText.trim();
-    if (!text) return;
+    if (!text || !me) return;
+    const optimistic: ChatMsg = {
+      id: `local-${Date.now()}`,
+      from: me.id,
+      fromName: me.name,
+      text,
+      at: Date.now(),
+    };
+    const prevChat = ((state?.chat as ChatMsg[]) || []).slice();
+    setChatText("");
+    if (state) setState({ ...state, chat: [...prevChat, optimistic] });
     const res = await fetch("/api/guest/chat", {
       method: "POST",
       headers: {
@@ -192,11 +284,12 @@ export default function JoinInner() {
     });
     const data = await readJson<{ ok?: boolean; error?: string; state?: Record<string, unknown> }>(res);
     if (!res.ok || data.error) {
+      if (state) setState({ ...state, chat: prevChat });
+      setChatText(text);
       setError(data.error || "Чат недоступен");
       return;
     }
     if (data.state) setState(data.state);
-    setChatText("");
   }
 
   const me = state?.me as Guest | undefined;
@@ -204,63 +297,112 @@ export default function JoinInner() {
   const partners = pair?.partners?.length ? pair.partners : pair?.partner ? [pair.partner] : [];
   const phase = String(state?.phase || "lobby");
   const isTriple = (pair?.size || partners.length + 1) >= 3;
-  const chat = ((state?.chat as ChatMsg[]) || []);
+  const chat = (state?.chat as ChatMsg[]) || [];
   const timer = state?.timer as { kind: string | null; remainingMs: number; totalSec: number; running: boolean } | undefined;
+  const needsPhoto = Boolean(me && !me.photoUrl);
+
+  function PhotoCta({
+    preview,
+    onPick,
+    inputRef,
+    pulse,
+  }: {
+    preview: string | null;
+    onPick: (f: File | null) => void;
+    inputRef: RefObject<HTMLInputElement | null>;
+    pulse?: boolean;
+  }) {
+    return (
+      <div className={`photo-cta ${pulse && !preview ? "photo-cta--urgent" : ""} ${photoFlash ? "photo-cta--flash" : ""}`}>
+        <button type="button" className="photo-cta__hit" onClick={() => inputRef.current?.click()} disabled={uploading}>
+          {preview ? (
+            <Avatar name={name || me?.name || "Вы"} photoUrl={preview} size={112} />
+          ) : (
+            <span className="photo-cta__empty">
+              <span className="photo-cta__plus">+</span>
+              <span className="photo-cta__label">Добавить фото</span>
+              <span className="photo-cta__hint">Нажмите — камера или галерея</span>
+            </span>
+          )}
+        </button>
+        {preview && (
+          <button type="button" className="btn-ghost photo-cta__change" onClick={() => inputRef.current?.click()} disabled={uploading}>
+            {uploading ? "Сохраняем…" : "Сменить фото"}
+          </button>
+        )}
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/*"
+          capture="user"
+          className="sr-only"
+          onChange={(e) => {
+            onPick(e.target.files?.[0] || null);
+            e.target.value = "";
+          }}
+        />
+      </div>
+    );
+  }
 
   if (!joined || !me) {
     return (
       <div className="shell flex flex-col">
-        <div className="flex flex-1 flex-col justify-center gap-6">
+        <div className="flex flex-1 flex-col justify-center gap-6 animate-rise">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/brand/logo.png" alt="Schmidt" className="brand-mark mx-auto" />
           <div className="text-center">
             <h1 className="display text-3xl font-semibold">Вход в зал</h1>
-            <p className="mt-2" style={{ color: "var(--mute)" }}>
-              Фото, имя и компания — и вы в игре.
+            <p className="mt-2 text-balance" style={{ color: "var(--mute)" }}>
+              Фото видно партнёру. Имя и компания — и вы в игре.
             </p>
           </div>
           {!accessKey && (
-            <p className="rounded-xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(232,87,58,0.4)", background: "rgba(232,87,58,0.1)", color: "var(--signal)" }}>
+            <p
+              className="rounded-xl border px-4 py-3 text-sm"
+              style={{ borderColor: "rgba(255,92,122,0.35)", background: "rgba(255,92,122,0.1)", color: "var(--signal)" }}
+            >
               Откройте эту страницу по QR с экрана зала — иначе вход и фото недоступны.
             </p>
           )}
-          <form className="space-y-4" onSubmit={register}>
-            <label className="block">
-              <span className="label">Фото</span>
-              <input
-                type="file"
-                accept="image/*"
-                capture="user"
-                className="field file:mr-3 file:rounded-lg file:border-0 file:bg-[var(--gold)] file:px-3 file:py-1.5 file:text-black"
-                onChange={(e) => onPhoto(e.target.files?.[0] || null)}
-              />
+          <form className="space-y-5" onSubmit={register}>
+            <div>
+              <span className="label">Ваше фото</span>
+              <PhotoCta preview={photoUrl} onPick={(f) => onPhoto(f, false)} inputRef={fileRef} pulse={!photoUrl} />
               {uploading && (
-                <span className="mt-1 block text-xs" style={{ color: "var(--mute)" }}>
-                  Обработка…
+                <span className="mt-2 block text-xs" style={{ color: "var(--mute)" }}>
+                  Сжимаем фото…
                 </span>
               )}
-              {photoUrl && (
-                <div className="mt-3 flex justify-center">
-                  <Avatar name={name || "Вы"} photoUrl={photoUrl} size={88} />
-                </div>
-              )}
-            </label>
+            </div>
             <label className="block">
               <span className="label">Имя</span>
-              <input className="field" required value={name} onChange={(e) => setName(e.target.value)} placeholder="Как к вам обращаться" />
+              <input className="field" required value={name} onChange={(e) => setName(e.target.value)} placeholder="Как к вам обращаться" autoComplete="name" />
             </label>
             <label className="block">
               <span className="label">Компания</span>
-              <input className="field" required value={company} onChange={(e) => setCompany(e.target.value)} placeholder="Где работаете" />
+              <input
+                className="field"
+                required
+                value={company}
+                onChange={(e) => setCompany(e.target.value)}
+                placeholder="Где работаете"
+                autoComplete="organization"
+              />
             </label>
             {formError && (
               <p className="text-sm" style={{ color: "var(--signal)" }}>
                 {formError}
               </p>
             )}
-            <button type="submit" className="btn-gold w-full" disabled={uploading}>
-              Войти
+            <button type="submit" className="btn-gold w-full" disabled={uploading || submitting}>
+              {submitting ? "Входим…" : "Войти в зал"}
             </button>
+            {!photoUrl && (
+              <p className="text-center text-xs" style={{ color: "var(--gold-bright)" }}>
+                Можно войти без фото — добавите сразу после входа.
+              </p>
+            )}
           </form>
         </div>
         <BrandFooter />
@@ -270,7 +412,7 @@ export default function JoinInner() {
 
   return (
     <div className="shell flex flex-col">
-      <header className="mb-6 flex items-center justify-between gap-3">
+      <header className="mb-6 flex items-center justify-between gap-3 animate-rise">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/brand/logo.png" alt="Schmidt" className="h-8 w-auto object-contain" />
         <div className="text-right text-xs" style={{ color: "var(--mute)" }}>
@@ -287,10 +429,41 @@ export default function JoinInner() {
         </p>
       )}
 
+      <input
+        ref={profileFileRef}
+        type="file"
+        accept="image/*"
+        capture="user"
+        className="sr-only"
+        onChange={(e) => {
+          onPhoto(e.target.files?.[0] || null, true);
+          e.target.value = "";
+        }}
+      />
+
+      {needsPhoto && (
+        <section className="photo-banner mb-4 animate-pulse-soft">
+          <div className="photo-banner__copy">
+            <p className="display text-lg" style={{ color: "var(--gold-bright)" }}>
+              Добавьте фото
+            </p>
+            <p className="text-sm" style={{ color: "var(--mute)" }}>
+              Без фото вас сложнее найти в зале.
+            </p>
+          </div>
+          <button type="button" className="btn-gold shrink-0" onClick={() => profileFileRef.current?.click()} disabled={uploading}>
+            {uploading ? "…" : "Фото"}
+          </button>
+        </section>
+      )}
+
       {(phase === "lobby" || phase === "between") && (
-        <section className="panel text-center">
-          <div className="mx-auto mb-4 flex justify-center">
-            <Avatar name={me.name} photoUrl={me.photoUrl} size={96} />
+        <section className="panel text-center animate-rise">
+          <div className="mx-auto mb-4 flex flex-col items-center gap-3">
+            <Avatar name={me.name} photoUrl={me.photoUrl} size={104} />
+            <button type="button" className="btn-ghost text-sm" onClick={() => profileFileRef.current?.click()} disabled={uploading}>
+              {me.photoUrl ? "Сменить фото" : "Добавить фото"}
+            </button>
           </div>
           <h1 className="display text-2xl">{me.name}</h1>
           <p style={{ color: "var(--mute)" }}>{me.company}</p>
@@ -304,7 +477,7 @@ export default function JoinInner() {
       )}
 
       {phase === "matching" && (
-        <section className="panel text-center">
+        <section className="panel text-center animate-rise">
           <div className="mx-auto mb-4 flex justify-center">
             <Avatar name={me.name} photoUrl={me.photoUrl} size={96} />
           </div>
@@ -321,7 +494,7 @@ export default function JoinInner() {
       )}
 
       {(phase === "searching" || phase === "networking") && pair && (
-        <section className="space-y-4">
+        <section className="space-y-4 animate-rise">
           {pair.bye ? (
             <div className="panel text-center">
               <h1 className="display text-2xl">Вы без пары в этом раунде</h1>
@@ -453,11 +626,14 @@ export default function JoinInner() {
       )}
 
       {phase === "done" && (
-        <section className="panel text-center">
+        <section className="panel text-center animate-rise">
           <h1 className="display text-2xl">Нетворкинг завершён</h1>
           <p className="mt-2" style={{ color: "var(--mute)" }}>
             Спасибо — обменяйтесь контактами, пока рядом.
           </p>
+          <button type="button" className="btn-ghost mt-4" onClick={() => profileFileRef.current?.click()} disabled={uploading}>
+            {me.photoUrl ? "Обновить фото" : "Добавить фото"}
+          </button>
         </section>
       )}
 

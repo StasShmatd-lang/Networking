@@ -21,14 +21,14 @@ export function Avatar({
         alt={name || ""}
         width={size}
         height={size}
-        className="rounded-full object-cover ring-2 ring-[rgba(201,166,107,0.4)]"
+        className="rounded-full object-cover ring-2 ring-[rgba(209,167,112,0.45)]"
         style={{ width: size, height: size }}
       />
     );
   }
   return (
     <div
-      className="flex items-center justify-center rounded-full font-semibold ring-2 ring-[rgba(201,166,107,0.3)]"
+      className="display flex items-center justify-center rounded-full font-semibold ring-2 ring-[rgba(209,167,112,0.35)]"
       style={{ width: size, height: size, fontSize: size * 0.28, background: "var(--lift)", color: "var(--gold)" }}
     >
       {initials}

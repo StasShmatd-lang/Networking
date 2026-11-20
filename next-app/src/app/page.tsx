@@ -11,6 +11,7 @@ export default function HomePage() {
   const [err, setErr] = useState<string | null>(null);
 
   async function createEvent() {
+    if (busy) return;
     setBusy(true);
     setErr(null);
     try {
@@ -29,26 +30,29 @@ export default function HomePage() {
       router.push(`/host/${data.id}`);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Не удалось создать");
-    } finally {
       setBusy(false);
     }
   }
 
   return (
     <div className="shell flex flex-col">
-      <div className="flex flex-1 flex-col justify-center gap-8">
+      <div className="flex flex-1 flex-col justify-center gap-8 animate-rise">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/brand/logo.png" alt="Schmidt" className="brand-mark mx-auto" />
         <div className="text-center">
-          <h1 className="display text-3xl font-semibold sm:text-4xl">Нетворкинг</h1>
-          <p className="mt-3 text-base" style={{ color: "var(--mute)" }}>
+          <h1 className="display text-4xl font-semibold sm:text-5xl">Нетворкинг</h1>
+          <p className="mt-3 text-base text-balance" style={{ color: "var(--mute)" }}>
             QR → профиль → пара → поиск → разговор с одним вопросом.
           </p>
         </div>
         <button type="button" className="btn-gold w-full" disabled={busy} onClick={createEvent}>
           {busy ? "Создаём…" : "Создать событие"}
         </button>
-        {err && <p className="text-center text-sm" style={{ color: "var(--signal)" }}>{err}</p>}
+        {err && (
+          <p className="text-center text-sm" style={{ color: "var(--signal)" }}>
+            {err}
+          </p>
+        )}
       </div>
       <BrandFooter />
     </div>

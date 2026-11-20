@@ -22,7 +22,7 @@ export function HallQr({ joinUrl }: { joinUrl: string }) {
         className="relative z-20 inline-flex flex-col items-center rounded-[1.35rem] bg-[var(--mist)] p-3 shadow-lg"
         aria-label="Увеличить QR"
       >
-        <QRCodeSVG value={joinUrl} size={120} bgColor="#F2EDE4" fgColor="#0B0A09" level="M" />
+        <QRCodeSVG value={joinUrl} size={120} bgColor="#E7ECF4" fgColor="#050608" level="M" />
         <span className="mt-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-black/65">
           нажмите · крупнее
         </span>
@@ -35,8 +35,8 @@ export function HallQr({ joinUrl }: { joinUrl: string }) {
               <QRCodeSVG
                 value={joinUrl}
                 size={typeof window !== "undefined" ? Math.min(560, Math.floor(window.innerHeight * 0.64)) : 480}
-                bgColor="#F2EDE4"
-                fgColor="#0B0A09"
+                bgColor="#E7ECF4"
+                fgColor="#050608"
                 level="M"
               />
             </button>

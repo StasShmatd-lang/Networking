@@ -7,11 +7,12 @@ export const runtime = "nodejs";
 
 export async function POST(req: Request) {
   try {
-    const body = (await readBodyLimited(req, 400_000)) as {
+    const body = (await readBodyLimited(req, 200_000)) as {
       eventId?: string;
       accessKey?: string;
       guestId?: string;
       guestToken?: string;
+      clientKey?: string;
       name?: string;
       company?: string;
       photoUrl?: string | null;

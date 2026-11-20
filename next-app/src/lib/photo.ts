@@ -1,8 +1,12 @@
+const MAX_SIDE = 360;
+const TARGET_CHARS = 90_000;
+const HARD_LIMIT_CHARS = 140_000;
+
+/** Compress a guest photo to a small JPEG data-URL for faster poll payloads. */
 export async function fileToDataUrl(file: File): Promise<string> {
   if (!file.type.startsWith("image/")) throw new Error("Нужно изображение");
   const bitmap = await createImageBitmap(file);
-  const maxSide = 512;
-  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+  const scale = Math.min(1, MAX_SIDE / Math.max(bitmap.width, bitmap.height));
   const w = Math.max(1, Math.round(bitmap.width * scale));
   const h = Math.max(1, Math.round(bitmap.height * scale));
   const canvas = document.createElement("canvas");
@@ -12,12 +16,13 @@ export async function fileToDataUrl(file: File): Promise<string> {
   if (!ctx) throw new Error("Canvas недоступен");
   ctx.drawImage(bitmap, 0, 0, w, h);
   bitmap.close();
-  let quality = 0.82;
+
+  let quality = 0.72;
   let out = canvas.toDataURL("image/jpeg", quality);
-  while (out.length > 320_000 && quality > 0.4) {
-    quality -= 0.1;
+  while (out.length > TARGET_CHARS && quality > 0.38) {
+    quality -= 0.08;
     out = canvas.toDataURL("image/jpeg", quality);
   }
-  if (out.length > 350_000) throw new Error("Фото слишком большое");
+  if (out.length > HARD_LIMIT_CHARS) throw new Error("Фото слишком большое — попробуйте другое");
   return out;
 }

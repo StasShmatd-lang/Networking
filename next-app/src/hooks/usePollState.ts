@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { readJson } from "@/lib/apiClient";
 
 export type PollAuth = {
@@ -10,9 +10,18 @@ export type PollAuth = {
   guestId?: string;
 };
 
+/** Lobby can poll slower; live rounds stay near 1s. */
+function intervalForPhase(phase: unknown, role: string) {
+  if (role === "screen") return 1000;
+  if (phase === "lobby" || phase === "between" || phase === "done") return 2000;
+  return 1000;
+}
+
 export function usePollState(auth: PollAuth | null, enabled = true) {
   const [state, setState] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   const eventId = auth?.eventId ?? "";
   const role = auth?.role;
@@ -22,6 +31,7 @@ export function usePollState(auth: PollAuth | null, enabled = true) {
   useEffect(() => {
     if (!enabled || !eventId || !role || !token) return;
     let cancelled = false;
+    let timer: number | undefined;
 
     async function tick() {
       try {
@@ -50,14 +60,18 @@ export function usePollState(auth: PollAuth | null, enabled = true) {
         }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : "Ошибка связи");
+      } finally {
+        if (!cancelled) {
+          const ms = intervalForPhase(stateRef.current?.phase, role!);
+          timer = window.setTimeout(tick, ms);
+        }
       }
     }
 
     tick();
-    const id = window.setInterval(tick, 1000);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      if (timer) window.clearTimeout(timer);
     };
   }, [eventId, role, token, guestId, enabled]);
 

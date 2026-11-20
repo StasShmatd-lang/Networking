@@ -109,7 +109,7 @@ export default function HostPage() {
           </h2>
           {joinUrl && (
             <div className="mx-auto w-fit rounded-2xl bg-[var(--mist)] p-3">
-              <QRCodeSVG value={joinUrl} size={200} bgColor="#F2EDE4" fgColor="#0B0A09" />
+              <QRCodeSVG value={joinUrl} size={200} bgColor="#E7ECF4" fgColor="#050608" />
             </div>
           )}
           <div className="rounded-xl px-4 py-3 text-sm" style={{ background: "var(--lift)" }}>

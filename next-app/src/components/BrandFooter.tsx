@@ -1,5 +1,4 @@
-const INSTAGRAM_URL =
-  "https://www.instagram.com/st.shmidt?mdxt=emx1MzR3dmN0MmZx&utm_source=qr";
+const INSTAGRAM_URL = "https://instagram.com/st.shmidt";
 
 export function BrandFooter() {
   return (
@@ -8,11 +7,11 @@ export function BrandFooter() {
         href={INSTAGRAM_URL}
         target="_blank"
         rel="noopener noreferrer"
-        className="flex flex-col items-center gap-2 opacity-70 transition hover:opacity-100"
+        className="flex flex-col items-center gap-2 opacity-55 transition hover:opacity-100"
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src="/brand/logo.png" alt="Schmidt" width={120} height={40} className="h-8 w-auto" />
-        <span className="text-xs tracking-wide" style={{ color: "var(--mute)" }}>
+        <img src="/brand/logo.png" alt="Schmidt" width={120} height={40} className="h-7 w-auto" />
+        <span className="text-[11px] tracking-[0.08em]" style={{ color: "var(--mute)" }}>
           instagram.com/st.shmidt
         </span>
       </a>
