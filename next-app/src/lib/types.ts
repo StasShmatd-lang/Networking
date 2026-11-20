@@ -11,6 +11,7 @@ export type Guest = {
   photoId?: string | null;
   /** Legacy inline data-URL from older events (kept readable, never written). */
   photoUrl?: string | null;
+  /** false = guest pressed «Выйти»: kept in the event, skipped in pairing until they return. */
   ready: boolean;
 };
 
@@ -20,6 +21,8 @@ export type Group = {
   askerId: string;
   found: boolean;
   bye: boolean;
+  /** The partner left mid-round; the one who stayed waits for the next round (or a late joiner). */
+  partnerLeft?: boolean;
 };
 
 export type ChatMessage = {
@@ -40,6 +43,10 @@ export type EventData = {
   totalRounds: number;
   searchSec: number;
   networkSec: number;
+  /** Start the next round by itself after a short break (default on). */
+  autoNext?: boolean;
+  /** Break between rounds when autoNext is on, seconds. */
+  breakSec?: number;
   questions: string[];
   guests: Guest[];
   pairs: Group[];

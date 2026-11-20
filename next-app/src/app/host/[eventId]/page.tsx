@@ -6,7 +6,17 @@ import { QRCodeSVG } from "qrcode.react";
 import { useParams } from "next/navigation";
 import { BrandFooter } from "@/components/BrandFooter";
 import { readJson } from "@/lib/apiClient";
+import { TimerDisplay } from "@/components/TimerDisplay";
 import { usePollState } from "@/hooks/usePollState";
+
+const PHASE_LABEL: Record<string, string> = {
+  lobby: "сбор гостей",
+  matching: "перемешиваем",
+  searching: "поиск пары",
+  networking: "разговор",
+  between: "пауза",
+  done: "завершено",
+};
 
 export default function HostPage() {
   const { eventId = "" } = useParams<{ eventId: string }>();
@@ -20,6 +30,8 @@ export default function HostPage() {
   const [totalRounds, setTotalRounds] = useState(5);
   const [searchSec, setSearchSec] = useState(90);
   const [networkSec, setNetworkSec] = useState(180);
+  const [autoNext, setAutoNext] = useState(true);
+  const [breakSec, setBreakSec] = useState(20);
   const [base, setBase] = useState("");
 
   useEffect(() => {
@@ -37,6 +49,8 @@ export default function HostPage() {
     setTotalRounds(Number(state.totalRounds) || 5);
     setSearchSec(Number(state.searchSec) || 90);
     setNetworkSec(Number(state.networkSec) || 180);
+    setAutoNext(state.autoNext !== false);
+    setBreakSec(Number(state.breakSec) || 20);
     if (state.screenToken) sessionStorage.setItem(`screenToken:${eventId}`, String(state.screenToken));
   }, [state?.id, eventId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -59,6 +73,8 @@ export default function HostPage() {
   function openHallScreen() {
     if (screenToken) sessionStorage.setItem(`screenToken:${eventId}`, screenToken);
   }
+
+  const timer = state?.timer as { kind: string | null; remainingMs: number; totalSec: number; running: boolean } | undefined;
 
   async function act(action: string, settings?: object) {
     const res = await fetch("/api/host", {
@@ -113,11 +129,19 @@ export default function HostPage() {
             </div>
           )}
           <div className="rounded-xl px-4 py-3 text-sm" style={{ background: "var(--lift)" }}>
-            <div style={{ color: "var(--mute)" }}>Гостей</div>
+            <div style={{ color: "var(--mute)" }}>В игре</div>
             <div className="display text-3xl">{String(state?.guestCount ?? 0)}</div>
+            {Number(state?.leftCount) > 0 && (
+              <div style={{ color: "var(--mute)" }}>вышли: {String(state?.leftCount)}</div>
+            )}
             <div style={{ color: "var(--mute)" }}>
-              {String(state?.phase || "…")} · р.{String(state?.round ?? 0)}/{String(state?.totalRounds ?? "—")}
+              {PHASE_LABEL[String(state?.phase)] || "…"} · р.{String(state?.round ?? 0)}/{String(state?.totalRounds ?? "—")}
             </div>
+            {timer?.kind && (
+              <div className="mt-3">
+                <TimerDisplay timer={timer} />
+              </div>
+            )}
           </div>
         </aside>
         <section className="space-y-6">
@@ -130,7 +154,7 @@ export default function HostPage() {
                 Старт раунда
               </button>
               <button type="button" className="btn-ghost" onClick={() => act("skip")}>
-                Следующая фаза
+                {state?.phase === "between" ? "Начать раунд сейчас" : "Следующая фаза"}
               </button>
               <button type="button" className="btn-signal" onClick={() => act("stop")}>
                 Стоп / сброс
@@ -141,7 +165,24 @@ export default function HostPage() {
             <h2 className="display text-lg" style={{ color: "var(--gold-bright)" }}>
               Настройки
             </h2>
-            <div className="grid gap-4 sm:grid-cols-3">
+            <label className="flex items-center gap-3 rounded-xl px-4 py-3" style={{ background: "var(--lift)" }}>
+              <input
+                type="checkbox"
+                className="h-5 w-5 accent-[var(--gold)]"
+                checked={autoNext}
+                onChange={(e) => {
+                  setAutoNext(e.target.checked);
+                  void act("settings", { autoNext: e.target.checked });
+                }}
+              />
+              <span>
+                <span className="block font-semibold">Следующий раунд — автоматически</span>
+                <span className="text-sm" style={{ color: "var(--mute)" }}>
+                  После разговора пауза, потом новые пары без нажатия «Старт»
+                </span>
+              </span>
+            </label>
+            <div className="grid gap-4 sm:grid-cols-4">
               <label>
                 <span className="label">Раундов</span>
                 <input className="field" type="number" value={totalRounds} onChange={(e) => setTotalRounds(Number(e.target.value))} />
@@ -153,6 +194,10 @@ export default function HostPage() {
               <label>
                 <span className="label">Нетворкинг, сек</span>
                 <input className="field" type="number" value={networkSec} onChange={(e) => setNetworkSec(Number(e.target.value))} />
+              </label>
+              <label>
+                <span className="label">Пауза, сек</span>
+                <input className="field" type="number" value={breakSec} onChange={(e) => setBreakSec(Number(e.target.value))} />
               </label>
             </div>
             <label>
@@ -167,6 +212,7 @@ export default function HostPage() {
                   totalRounds,
                   searchSec,
                   networkSec,
+                  breakSec,
                   questions: questionsText.split("\n").map((q) => q.trim()).filter(Boolean),
                 })
               }

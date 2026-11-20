@@ -10,7 +10,7 @@ import { fileToDataUrl } from "@/lib/photo";
 import { usePollState } from "@/hooks/usePollState";
 
 type ChatMsg = { id: string; from: string; fromName?: string; text: string; at: number };
-type Guest = { id: string; name: string; company: string; photoUrl?: string | null; hasPhoto?: boolean };
+type Guest = { id: string; name: string; company: string; photoUrl?: string | null; hasPhoto?: boolean; ready?: boolean };
 type Pair = {
   id: string;
   size: number;
@@ -19,6 +19,7 @@ type Pair = {
   askerId: string;
   found: boolean;
   bye: boolean;
+  partnerLeft?: boolean;
   amAsker: boolean;
 };
 
@@ -61,6 +62,8 @@ export default function JoinInner() {
   const [chatText, setChatText] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [photoFlash, setPhotoFlash] = useState(false);
+  const [confirmLeave, setConfirmLeave] = useState(false);
+  const [presenceBusy, setPresenceBusy] = useState(false);
   const chatEnd = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -234,6 +237,49 @@ export default function JoinInner() {
     }
   }
 
+  /** «Выйти» / «Вернуться в игру»: profile stays, only participation changes. */
+  async function setPresence(action: "leave" | "return") {
+    if (presenceBusy) return;
+    setPresenceBusy(true);
+    setConfirmLeave(false);
+    try {
+      const res = await fetch("/api/guest/leave", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${guestToken}`,
+          "x-guest-id": guestId,
+        },
+        body: JSON.stringify({ eventId, guestId, action }),
+      });
+      const data = await readJson<{ ok?: boolean; error?: string; state?: Record<string, unknown> }>(res);
+      if (!res.ok || !data.ok) throw new Error(data.error || "Не получилось");
+      if (data.state) setState(data.state);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не получилось");
+    } finally {
+      setPresenceBusy(false);
+    }
+  }
+
+  /** Forget this profile on this phone and show the entry form (for another person). */
+  function switchProfile() {
+    localStorage.removeItem(storageKey);
+    localStorage.removeItem(tokenKey);
+    localStorage.removeItem(`guestClient:${eventId}`);
+    const ck = ensureClientKey(eventId);
+    clientKeyRef.current = ck;
+    setClientKey(ck);
+    setGuestId("");
+    setGuestToken("");
+    setName("");
+    setCompany("");
+    setPhotoUrl(null);
+    setState(null);
+    setJoined(false);
+    joinLock.current = false;
+  }
+
   async function markFound() {
     if (!pair || pair.found) return;
     const prev = state;
@@ -300,6 +346,8 @@ export default function JoinInner() {
   const chat = (state?.chat as ChatMsg[]) || [];
   const timer = state?.timer as { kind: string | null; remainingMs: number; totalSec: number; running: boolean } | undefined;
   const needsPhoto = Boolean(me && !me.photoUrl);
+  const inGame = me?.ready !== false;
+  const roundLive = phase === "matching" || phase === "searching" || phase === "networking";
 
   function PhotoCta({
     preview,
@@ -334,7 +382,6 @@ export default function JoinInner() {
           ref={inputRef}
           type="file"
           accept="image/*"
-          capture="user"
           className="sr-only"
           onChange={(e) => {
             onPick(e.target.files?.[0] || null);
@@ -415,11 +462,28 @@ export default function JoinInner() {
       <header className="mb-6 flex items-center justify-between gap-3 animate-rise">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/brand/logo.png" alt="Schmidt" className="h-8 w-auto object-contain" />
-        <div className="text-right text-xs" style={{ color: "var(--mute)" }}>
-          <div>в сети</div>
-          <div>
-            {phase} · р.{String(state?.round)}/{String(state?.totalRounds)}
+        <div className="flex items-center gap-3">
+          <div className="text-right text-xs" style={{ color: "var(--mute)" }}>
+            <div>{inGame ? "в игре" : "вне игры"}</div>
+            <div>
+              раунд {String(state?.round)}/{String(state?.totalRounds)}
+            </div>
           </div>
+          {inGame &&
+            (confirmLeave ? (
+              <span className="flex gap-1.5">
+                <button type="button" className="btn-signal px-3 py-2 text-xs" onClick={() => void setPresence("leave")} disabled={presenceBusy}>
+                  Выйти
+                </button>
+                <button type="button" className="btn-ghost px-3 py-2 text-xs" onClick={() => setConfirmLeave(false)}>
+                  Нет
+                </button>
+              </span>
+            ) : (
+              <button type="button" className="btn-ghost px-3 py-2 text-xs" onClick={() => setConfirmLeave(true)}>
+                Выйти
+              </button>
+            ))}
         </div>
       </header>
 
@@ -433,7 +497,6 @@ export default function JoinInner() {
         ref={profileFileRef}
         type="file"
         accept="image/*"
-        capture="user"
         className="sr-only"
         onChange={(e) => {
           onPhoto(e.target.files?.[0] || null, true);
@@ -457,7 +520,42 @@ export default function JoinInner() {
         </section>
       )}
 
-      {(phase === "lobby" || phase === "between") && (
+      {!inGame && (
+        <section className="panel text-center animate-rise">
+          <div className="mx-auto mb-4 flex justify-center opacity-60">
+            <Avatar name={me.name} photoUrl={me.photoUrl} size={96} />
+          </div>
+          <h1 className="display text-2xl">Вы вышли из нетворкинга</h1>
+          <p className="mt-2" style={{ color: "var(--mute)" }}>
+            Профиль сохранён — {me.name}, {me.company}. Вас не будут ставить в пары, пока не вернётесь.
+          </p>
+          <button type="button" className="btn-gold mt-6 w-full" onClick={() => void setPresence("return")} disabled={presenceBusy}>
+            {presenceBusy ? "…" : roundLive ? "Вернуться в игру — прямо в этот раунд" : "Вернуться в игру"}
+          </button>
+          <button type="button" className="btn-ghost mt-3 w-full" onClick={switchProfile}>
+            Войти другим профилем
+          </button>
+        </section>
+      )}
+
+      {inGame && roundLive && !pair && (
+        <section className="panel text-center animate-rise">
+          <div className="mx-auto mb-4 flex justify-center">
+            <Avatar name={me.name} photoUrl={me.photoUrl} size={96} />
+          </div>
+          <h1 className="display text-2xl">Вы в зале!</h1>
+          <p className="mt-2" style={{ color: "var(--mute)" }}>
+            Раунд уже идёт. Как только освободится место — подключим вас, иначе — с первых секунд следующего раунда.
+          </p>
+          {timer?.kind && (
+            <div className="mt-6">
+              <TimerDisplay timer={timer} />
+            </div>
+          )}
+        </section>
+      )}
+
+      {inGame && (phase === "lobby" || phase === "between") && (
         <section className="panel text-center animate-rise">
           <div className="mx-auto mb-4 flex flex-col items-center gap-3">
             <Avatar name={me.name} photoUrl={me.photoUrl} size={104} />
@@ -468,15 +566,24 @@ export default function JoinInner() {
           <h1 className="display text-2xl">{me.name}</h1>
           <p style={{ color: "var(--mute)" }}>{me.company}</p>
           <p className="mt-4 text-sm" style={{ color: "var(--gold-bright)" }}>
-            {phase === "lobby" ? "Ждём старта от ведущего. Держите телефон под рукой." : "Пауза. Скоро новый раунд."}
+            {phase === "lobby"
+              ? "Ждём старта от ведущего. Держите телефон под рукой."
+              : timer?.kind === "break"
+                ? "Пауза. Новый раунд начнётся сам через:"
+                : "Пауза. Скоро новый раунд."}
           </p>
+          {phase === "between" && timer?.kind === "break" && (
+            <div className="mt-4">
+              <TimerDisplay timer={timer} />
+            </div>
+          )}
           <p className="mt-2 text-xs" style={{ color: "var(--mute)" }}>
             В зале: {String(state?.guestCount)}
           </p>
         </section>
       )}
 
-      {phase === "matching" && (
+      {inGame && phase === "matching" && pair && (
         <section className="panel text-center animate-rise">
           <div className="mx-auto mb-4 flex justify-center">
             <Avatar name={me.name} photoUrl={me.photoUrl} size={96} />
@@ -493,13 +600,17 @@ export default function JoinInner() {
         </section>
       )}
 
-      {(phase === "searching" || phase === "networking") && pair && (
+      {inGame && (phase === "searching" || phase === "networking") && pair && (
         <section className="space-y-4 animate-rise">
           {pair.bye ? (
             <div className="panel text-center">
-              <h1 className="display text-2xl">Вы без пары в этом раунде</h1>
+              <h1 className="display text-2xl">
+                {pair.partnerLeft ? "Партнёр вышел из игры" : "Вы без пары в этом раунде"}
+              </h1>
               <p className="mt-2" style={{ color: "var(--mute)" }}>
-                Отдохните — в следующем точно попадёте в игру.
+                {pair.partnerLeft
+                  ? "Если кто-то войдёт в зал — подключим его к вам. Иначе — новая пара в следующем раунде."
+                  : "Отдохните — в следующем точно попадёте в игру."}
               </p>
             </div>
           ) : (

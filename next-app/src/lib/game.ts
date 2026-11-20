@@ -87,6 +87,49 @@ const MAX_EVENT_JSON_BYTES = 6_000_000;
 /** One avatar after client compression is ~20–40 KB; this is a hard safety cap. */
 const MAX_PHOTO_BYTES = 150_000;
 
+const MATCHING_SEC = 8;
+const DEFAULT_BREAK_SEC = 20;
+
+function readyGuests(ev: EventData) {
+  return ev.guests.filter((g) => g.ready);
+}
+
+function breakSecOf(ev: EventData) {
+  return ev.breakSec ?? DEFAULT_BREAK_SEC;
+}
+
+/** New round: shuffle everyone who is in the game into pairs (or a triple). */
+function startRound(ev: EventData) {
+  ev.round += 1;
+  buildPairs(ev);
+  ev.phase = "matching";
+  ev.timer = { kind: "matching", endsAt: Date.now() + MATCHING_SEC * 1000, totalSec: MATCHING_SEC };
+}
+
+function startNetworking(ev: EventData) {
+  for (const p of ev.pairs) if (!p.bye) p.found = true;
+  ev.phase = "networking";
+  ev.timer = { kind: "network", endsAt: Date.now() + ev.networkSec * 1000, totalSec: ev.networkSec };
+}
+
+/** Round over → final screen, or a break that starts the next round by itself. */
+function endRound(ev: EventData) {
+  ev.pairs = [];
+  ev.chat = {};
+  if (ev.round >= ev.totalRounds) {
+    ev.phase = "done";
+    ev.timer = { kind: null, endsAt: null, totalSec: 0 };
+    return;
+  }
+  ev.phase = "between";
+  if (ev.autoNext !== false) {
+    const sec = breakSecOf(ev);
+    ev.timer = { kind: "break", endsAt: Date.now() + sec * 1000, totalSec: sec };
+  } else {
+    ev.timer = { kind: null, endsAt: null, totalSec: 0 };
+  }
+}
+
 /** Returns true when phase/timer actually changed. */
 function advanceTimers(ev: EventData): boolean {
   if (!ev.timer.endsAt || Date.now() < ev.timer.endsAt) return false;
@@ -96,23 +139,75 @@ function advanceTimers(ev: EventData): boolean {
     return true;
   }
   if (ev.phase === "searching") {
-    for (const p of ev.pairs) if (!p.bye) p.found = true;
-    ev.phase = "networking";
-    ev.timer = { kind: "network", endsAt: Date.now() + ev.networkSec * 1000, totalSec: ev.networkSec };
+    startNetworking(ev);
     return true;
   }
   if (ev.phase === "networking") {
-    ev.timer = { kind: null, endsAt: null, totalSec: 0 };
-    if (ev.round >= ev.totalRounds) {
-      ev.phase = "done";
-      ev.pairs = [];
-    } else {
-      ev.phase = "between";
-      ev.pairs = [];
-    }
+    endRound(ev);
+    return true;
+  }
+  if (ev.phase === "between") {
+    // Break is over: next round starts by itself (needs at least 2 people still in the game).
+    if (readyGuests(ev).length >= 2) startRound(ev);
+    else ev.timer = { kind: null, endsAt: null, totalSec: 0 };
     return true;
   }
   return false;
+}
+
+/** All groups found each other (or are waiting alone) → straight to the conversation. */
+function maybeAllFound(ev: EventData) {
+  if (ev.phase !== "searching") return;
+  if (ev.pairs.length && ev.pairs.every((p) => p.found || p.bye)) startNetworking(ev);
+}
+
+/**
+ * Put a guest who is not in a group into the running round:
+ * first to someone whose partner left, otherwise turn an unfound pair into a triple.
+ * During the conversation phase only a lone guest can be joined; else they wait for the next round.
+ */
+function placeIntoRound(ev: EventData, guestId: string) {
+  if (findGroup(ev, guestId)) return;
+  if (ev.phase !== "matching" && ev.phase !== "searching" && ev.phase !== "networking") return;
+  const lone = ev.pairs.find((p) => p.members.length === 1);
+  if (lone) {
+    lone.members.push(guestId);
+    lone.bye = false;
+    lone.partnerLeft = false;
+    lone.found = ev.phase === "networking";
+    ev.chat[lone.id] ??= [];
+    return;
+  }
+  if (ev.phase === "networking") return;
+  const open = shuffle(ev.pairs.filter((p) => !p.bye && !p.found && p.members.length === 2))[0];
+  if (open) open.members.push(guestId);
+}
+
+/** Take a guest out of their group; a partner left alone is re-homed or waits. */
+function removeFromRound(ev: EventData, guestId: string) {
+  const group = findGroup(ev, guestId);
+  if (!group) return;
+  group.members = group.members.filter((id) => id !== guestId);
+  if (group.askerId === guestId && group.members[0]) group.askerId = group.members[0];
+  if (group.members.length === 0) {
+    ev.pairs = ev.pairs.filter((p) => p.id !== group.id);
+    delete ev.chat[group.id];
+  } else if (group.members.length === 1) {
+    const alone = group.members[0];
+    const target =
+      ev.phase === "matching" || ev.phase === "searching"
+        ? ev.pairs.find((p) => p.id !== group.id && !p.bye && !p.found && p.members.length === 2)
+        : undefined;
+    if (target) {
+      target.members.push(alone);
+      ev.pairs = ev.pairs.filter((p) => p.id !== group.id);
+      delete ev.chat[group.id];
+    } else {
+      group.bye = true;
+      group.partnerLeft = true;
+    }
+  }
+  maybeAllFound(ev);
 }
 
 export async function loadEvent(id: string): Promise<EventData | null> {
@@ -197,6 +292,8 @@ export async function createEvent() {
     totalRounds: 5,
     searchSec: 90,
     networkSec: 180,
+    autoNext: true,
+    breakSec: DEFAULT_BREAK_SEC,
     questions: [...DEFAULT_QUESTIONS],
     guests: [],
     pairs: [],
@@ -221,12 +318,13 @@ function findGroup(ev: EventData, guestId: string) {
 export function publicState(ev: EventData, role: "host" | "guest" | "screen", guestId?: string) {
   // Screen needs faces for flying avatars (except networking board); host/guest polls strip bulk photos.
   const screenPhotos = role === "screen" && ev.phase !== "networking";
+  const inGame = readyGuests(ev);
   const guests =
     role === "guest"
       ? []
       : role === "host"
         ? ev.guests.map((g) => guestPublic(g, false))
-        : ev.guests.map((g) => guestPublic(g, screenPhotos));
+        : inGame.map((g) => guestPublic(g, screenPhotos));
 
   const pairs = ev.pairs.map((p) => {
     const members = p.members
@@ -249,6 +347,7 @@ export function publicState(ev: EventData, role: "host" | "guest" | "screen", gu
       askerId: p.askerId,
       found: p.found,
       bye: p.bye,
+      partnerLeft: Boolean(p.partnerLeft),
     };
   });
 
@@ -260,7 +359,10 @@ export function publicState(ev: EventData, role: "host" | "guest" | "screen", gu
     searchSec: ev.searchSec,
     networkSec: ev.networkSec,
     question: ev.round > 0 ? questionForRound(ev) : null,
-    guestCount: ev.guests.length,
+    guestCount: inGame.length,
+    leftCount: ev.guests.length - inGame.length,
+    autoNext: ev.autoNext !== false,
+    breakSec: breakSecOf(ev),
     guests,
     pairs: role === "guest" ? [] : pairs,
     timer: serializeTimer(ev),
@@ -294,6 +396,7 @@ export function publicState(ev: EventData, role: "host" | "guest" | "screen", gu
           askerId: pair.askerId,
           found: pair.found,
           bye: pair.bye,
+          partnerLeft: Boolean(pair.partnerLeft),
           amAsker: pair.askerId === guestId,
         }
       : null;
@@ -320,11 +423,20 @@ function normalizeClientKey(raw: unknown) {
   return key;
 }
 
+type HostSettings = Partial<{
+  totalRounds: number;
+  searchSec: number;
+  networkSec: number;
+  questions: string[];
+  autoNext: boolean;
+  breakSec: number;
+}>;
+
 export async function hostAction(
   eventId: string,
   hostToken: string,
   action: string,
-  settings?: Partial<{ totalRounds: number; searchSec: number; networkSec: number; questions: string[] }>,
+  settings?: HostSettings,
 ) {
   return mutateEvent(eventId, (ev) => {
     if (ev.hostToken !== hostToken) throw new Error("Нет доступа");
@@ -336,40 +448,42 @@ export async function hostAction(
 function applyHostAction(
   ev: EventData,
   action: string,
-  settings?: Partial<{ totalRounds: number; searchSec: number; networkSec: number; questions: string[] }>,
+  settings?: HostSettings,
 ) {
   if (action === "settings" && settings) {
     if (settings.totalRounds != null) ev.totalRounds = Math.min(20, Math.max(1, Number(settings.totalRounds) || 5));
     if (settings.searchSec != null) ev.searchSec = Math.min(600, Math.max(15, Number(settings.searchSec) || 90));
     if (settings.networkSec != null) ev.networkSec = Math.min(900, Math.max(30, Number(settings.networkSec) || 180));
+    if (settings.autoNext != null) {
+      ev.autoNext = Boolean(settings.autoNext);
+      // Switching auto on during a break starts the countdown; off stops it.
+      if (ev.phase === "between") {
+        const sec = breakSecOf(ev);
+        ev.timer = ev.autoNext
+          ? { kind: "break", endsAt: Date.now() + sec * 1000, totalSec: sec }
+          : { kind: null, endsAt: null, totalSec: 0 };
+      }
+    }
+    if (settings.breakSec != null) ev.breakSec = Math.min(300, Math.max(5, Number(settings.breakSec) || DEFAULT_BREAK_SEC));
     if (Array.isArray(settings.questions)) {
       ev.questions = settings.questions.map((q) => String(q).trim()).filter(Boolean).slice(0, 20);
       if (!ev.questions.length) ev.questions = [...DEFAULT_QUESTIONS];
     }
   } else if (action === "start") {
     if (ev.phase !== "lobby" && ev.phase !== "between") throw new Error("Сейчас нельзя стартовать");
-    if (ev.guests.filter((g) => g.ready).length < 2) throw new Error("Нужно минимум 2 гостя");
-    ev.round += 1;
-    buildPairs(ev);
-    ev.phase = "matching";
-    ev.timer = { kind: "matching", endsAt: Date.now() + 8_000, totalSec: 8 };
+    if (readyGuests(ev).length < 2) throw new Error("Нужно минимум 2 гостя");
+    startRound(ev);
   } else if (action === "skip") {
     if (ev.phase === "matching") {
       ev.phase = "searching";
       ev.timer = { kind: "search", endsAt: Date.now() + ev.searchSec * 1000, totalSec: ev.searchSec };
     } else if (ev.phase === "searching") {
-      for (const p of ev.pairs) if (!p.bye) p.found = true;
-      ev.phase = "networking";
-      ev.timer = { kind: "network", endsAt: Date.now() + ev.networkSec * 1000, totalSec: ev.networkSec };
+      startNetworking(ev);
     } else if (ev.phase === "networking") {
-      ev.timer = { kind: null, endsAt: null, totalSec: 0 };
-      if (ev.round >= ev.totalRounds) {
-        ev.phase = "done";
-        ev.pairs = [];
-      } else {
-        ev.phase = "between";
-        ev.pairs = [];
-      }
+      endRound(ev);
+    } else if (ev.phase === "between") {
+      if (readyGuests(ev).length < 2) throw new Error("Нужно минимум 2 гостя");
+      startRound(ev);
     } else throw new Error("Нечего пропускать");
   } else if (action === "stop") {
     ev.phase = "lobby";
@@ -471,10 +585,14 @@ async function guestJoinUnlocked(
           guest.photoUrl = null;
         }
       }
-      guest.ready = true;
+      // Only the explicit «Войти» form brings someone who pressed «Выйти» back;
+      // page reloads and photo updates leave their status as it is.
+      if (name && !guest.ready) {
+        guest.ready = true;
+        placeIntoRound(ev, guest.id);
+      }
     } else {
       if (!accessOk) throw new Error("Откройте ссылку из QR");
-      if (ev.phase !== "lobby" && ev.phase !== "between") throw new Error("Регистрация закрыта");
       if (ev.guests.length >= 650) throw new Error("Зал заполнен");
       if (!name || !company) throw new Error("Нужны имя и компания");
       guest = {
@@ -489,6 +607,8 @@ async function guestJoinUnlocked(
       ev.guests.push(guest);
       const photo = safeDataPhoto(input.photoUrl);
       if (photo) await storePhoto(q, ev, guest, photo);
+      // Joined while a round is running → straight into a group if there is room.
+      placeIntoRound(ev, guest.id);
     }
     return {
       guestId: guest.id,
@@ -506,9 +626,27 @@ export async function guestFound(eventId: string, guestId: string, guestToken: s
     const pair = findGroup(ev, guestId);
     if (!pair || pair.bye) throw new Error("Нет группы");
     pair.found = true;
-    if (ev.pairs.every((p) => p.found || p.bye)) {
-      ev.phase = "networking";
-      ev.timer = { kind: "network", endsAt: Date.now() + ev.networkSec * 1000, totalSec: ev.networkSec };
+    maybeAllFound(ev);
+    return publicState(ev, "guest", guestId);
+  });
+}
+
+/** «Выйти» / «Вернуться в игру» — the profile stays, only the participation changes. */
+export async function guestPresence(
+  eventId: string,
+  guestId: string,
+  guestToken: string,
+  action: "leave" | "return",
+) {
+  return mutateEvent(eventId, (ev) => {
+    const guest = ev.guests.find((g) => g.id === guestId);
+    if (!guest || guest.token !== guestToken) throw new Error("Нет сессии");
+    if (action === "leave") {
+      guest.ready = false;
+      removeFromRound(ev, guest.id);
+    } else {
+      guest.ready = true;
+      placeIntoRound(ev, guest.id);
     }
     return publicState(ev, "guest", guestId);
   });

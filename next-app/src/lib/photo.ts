@@ -4,9 +4,29 @@ const TARGET_CHARS = 50_000;
 const HARD_LIMIT_CHARS = 140_000;
 
 /** Compress a guest photo to a small JPEG data-URL for faster poll payloads. */
+/** createImageBitmap first; <img> fallback for older iPhones and odd camera/gallery files. */
+async function decodeImage(file: File): Promise<{ source: CanvasImageSource; width: number; height: number; done: () => void }> {
+  try {
+    const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+    return { source: bitmap, width: bitmap.width, height: bitmap.height, done: () => bitmap.close() };
+  } catch {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      return { source: img, width: img.naturalWidth, height: img.naturalHeight, done: () => URL.revokeObjectURL(url) };
+    } catch {
+      URL.revokeObjectURL(url);
+      throw new Error("Не получилось открыть фото — выберите другое");
+    }
+  }
+}
+
 export async function fileToDataUrl(file: File): Promise<string> {
-  if (!file.type.startsWith("image/")) throw new Error("Нужно изображение");
-  const bitmap = await createImageBitmap(file);
+  // Some phones give gallery/camera files an empty type — let the decoder decide.
+  if (file.type && !file.type.startsWith("image/")) throw new Error("Нужно изображение");
+  const bitmap = await decodeImage(file);
   const scale = Math.min(1, MAX_SIDE / Math.max(bitmap.width, bitmap.height));
   const w = Math.max(1, Math.round(bitmap.width * scale));
   const h = Math.max(1, Math.round(bitmap.height * scale));
@@ -15,8 +35,8 @@ export async function fileToDataUrl(file: File): Promise<string> {
   canvas.height = h;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas недоступен");
-  ctx.drawImage(bitmap, 0, 0, w, h);
-  bitmap.close();
+  ctx.drawImage(bitmap.source, 0, 0, w, h);
+  bitmap.done();
 
   let quality = 0.7;
   let out = canvas.toDataURL("image/jpeg", quality);

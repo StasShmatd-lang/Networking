@@ -11,7 +11,7 @@ export async function POST(req: Request) {
       eventId?: string;
       hostToken?: string;
       action?: string;
-      settings?: Partial<{ totalRounds: number; searchSec: number; networkSec: number; questions: string[] }>;
+      settings?: Parameters<typeof hostAction>[3];
     };
     const hostToken = bearerToken(req) || String(body.hostToken || "");
     const eventId = String(body.eventId || "").trim();

@@ -13,7 +13,7 @@ const PHASE_TITLE: Record<string, string> = {
   matching: "Перемешиваем знакомства",
   searching: "Найдите свою пару",
   networking: "Говорите по вопросу раунда",
-  between: "Пауза — готовьтесь к следующему раунду",
+  between: "Пауза — новые пары совсем скоро",
   done: "Спасибо за нетворкинг",
 };
 
@@ -115,7 +115,13 @@ export default function ScreenInner() {
         </div>
       </header>
       <main className="relative z-10 mt-10">
-        {timer?.kind && (phase === "searching" || phase === "networking" || phase === "matching") && (
+        {timer?.kind && (phase === "searching" || phase === "networking" || phase === "matching" || phase === "between") && (
+          <>
+          {phase === "between" && (
+            <p className="mb-3 text-center text-xl uppercase tracking-[0.2em]" style={{ color: "var(--mute)" }}>
+              Следующий раунд через
+            </p>
+          )}
           <div className="mb-10 flex justify-center">
             <div
               className="rounded-3xl border px-10 py-6 backdrop-blur"
@@ -124,6 +130,7 @@ export default function ScreenInner() {
               <TimerDisplay timer={timer} large />
             </div>
           </div>
+          </>
         )}
         {showPairs && <PairBoard pairs={pairs} />}
       </main>
