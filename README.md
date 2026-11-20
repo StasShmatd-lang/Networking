@@ -18,46 +18,25 @@ MVP нетворкинга для 500–600 гостей: QR → профиль 
 | Гость | `/join/:id` (QR) | Фото + имя + компания, поиск пары, чат, таймер с вопросом |
 | Экран зала | `/screen/:id` | Летающие аватары в поиске; пары имя+компания без лиц в нетворкинге |
 
-## Запуск без установки Node на компьютер
+## Где код
 
-1. **Опубликовать в Cursor** (кнопка Publish у агента) — открываете ссылку в обычном браузере. Для зала выберите visibility **public**, иначе гости без Cursor не зайдут.
-2. Или **портативный Node** (без установщика): с [nodejs.org](https://nodejs.org/) скачайте ZIP/binary, распакуйте, в терминале укажите путь к `node`/`npm` и выполните команды ниже.
-3. Онлайн-хостинг (Railway / Render / Fly) — тоже только браузер у гостей; Node крутится в облаке.
+Рабочее приложение — папка **`next-app/`** (Next.js + Postgres, локально PGlite). Старая версия на Express + Socket.IO удалена 20.11, она есть в истории git.
+
+## Публикация
+
+Опубликовать в Cursor (кнопка Publish), папка `next-app/`, visibility **public** — иначе гости без Cursor не зайдут. В проде нужен Postgres (`next-app/cursor-app.json`), таблицы создаются при сборке (`scripts/migrate.mjs`).
 
 ## Запуск локально
 
 Нужен [Node.js](https://nodejs.org/) 18+ (лучше 22 LTS).
 
 ```bash
-npm run install:all
-npm run dev
+cd next-app
+npm install
+env -u DATABASE_URL npm run dev
 ```
 
-Откройте **http://127.0.0.1:5173**
-
-- API / Socket.IO: порт **3001** (проксируется Vite в dev)
-- Загрузки фото: `uploads/`
-- Лого: `brand/logo.png` (то же в `client/public/brand/logo.png`)
-
-### Публичный QR (телефон в зале)
-
-```bash
-export PUBLIC_ORIGIN=https://your-tunnel.example
-export VITE_PUBLIC_ORIGIN=$PUBLIC_ORIGIN
-npm run dev:public
-```
-
-Или задайте значения в `.env` по образцу `.env.example`.
-
-### Прод-сборка (один порт)
-
-```bash
-npm run install:all
-npm run build
-PORT=3001 npm start
-```
-
-Сервер отдаёт `client/dist` и сокеты с одного порта.
+Откройте **http://127.0.0.1:3000**. Без `DATABASE_URL` используется встроенная PGlite (данные живут до перезапуска).
 
 ## Сценарий раунда
 
@@ -72,7 +51,7 @@ PORT=3001 npm start
 
 ## Скриншоты
 
-В репозитории: `docs/screenshots/`. Туда же пишется Context media при `npm run capture` из `client/` (нужен `npm run dev`):
+В репозитории: `docs/screenshots/`. Скриншоты интерфейса:
 
 - `networking-host.png` — панель ведущего  
 - `networking-guest.png` — телефон гостя  
@@ -85,4 +64,4 @@ PORT=3001 npm start
 
 ## Стек
 
-Express + Socket.IO, Vite + React, Multer (фото), QR (`qrcode.react`). Расчёт на сотни одновременных соединений на одном ноутбуке/сервере зала.
+Next.js (App Router), Postgres / PGlite, опрос состояния вместо сокетов, QR (`qrcode.react`). Фото — отдельная таблица `photos`.
